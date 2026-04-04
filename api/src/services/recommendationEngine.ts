@@ -136,7 +136,7 @@ export class RecommendationEngine {
       }
 
       // Step 4: Min similarity threshold
-      const minScore = parseFloat(process.env.MIN_SIMILARITY_SCORE || '0');
+      const minScore = parseFloat(process.env.MIN_SIMILARITY_SCORE || '0.35');
       let filtered = rerankedResults;
       if (minScore > 0) {
         filtered = rerankedResults.filter(r => r.similarity_score >= minScore);

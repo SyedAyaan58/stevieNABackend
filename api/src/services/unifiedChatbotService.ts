@@ -2,7 +2,6 @@ import { getSupabaseClient } from '../config/supabase';
 import logger from '../utils/logger';
 import { SessionManager } from './sessionManager';
 import { createHash } from 'crypto';
-// import { userProfileManager } from './userProfileManager'; // Removed - not pre-populating from profile
 import { recommendationEngine } from './recommendationEngine';
 import { explanationGenerator } from './explanationGenerator';
 import { cacheManager } from './cacheManager';
@@ -101,35 +100,6 @@ export class UnifiedChatbotService {
     const hash = createHash('md5').update(normalized).digest('hex');
     return `${this.KB_CACHE_PREFIX}${hash}`;
   }
-
-  // Note: Profile pre-population removed - we ask for everything fresh in intake flow
-  // Keeping these methods for potential future use
-  // private async requireProfileIfAuthenticated(userId: string): Promise<void> {
-  //   const profile = await userProfileManager.getProfile(userId);
-  //   if (!profile) {
-  //     const err: any = new Error('OnboardingRequired');
-  //     err.code = 'OnboardingRequired';
-  //     err.httpStatus = 409;
-  //     err.details = { missing: 'profile_row' };
-  //     throw err;
-  //   }
-
-  //   if (!profile.full_name || !profile.country || !profile.organization_name || !profile.email) {
-  //     const err: any = new Error('OnboardingRequired');
-  //     err.code = 'OnboardingRequired';
-  //     err.httpStatus = 409;
-  //     err.details = { missing: 'required_profile_fields' };
-  //     throw err;
-  //   }
-  // }
-
-  // private mapCountryToGeography(country: string): string | null {
-  //   if (!country) return null;
-  //   const countryLower = country.toLowerCase().trim();
-  //   if (countryLower === 'usa' || countryLower === 'united states' || countryLower === 'united states of america') return 'usa';
-  //   if (countryLower === 'canada') return 'canada';
-  //   return 'worldwide';
-  // }
 
   private persistChatMessagesFireAndForget(params: {
     sessionId: string;
