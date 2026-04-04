@@ -100,18 +100,21 @@ User just said:
 Return ONLY valid JSON (no markdown, no code fences):
 {
   "updates": {
-    "user_name": "string or omit",
-    "user_email": "string or omit",
-    "user_location": "string or omit",
-    "business_location": "string or null or omit",
-    "nomination_subject": "individual|team|organization|product or omit",
-    "org_type": "for_profit|non_profit or omit",
-    "gender_programs_opt_in": "true|false|__skipped__ or omit",
-    "nomination_scope": "regional|global|both or omit",
-    "description": "string or omit",
-    "achievement_impact": "string or omit",
-    "achievement_innovation": "string or omit",
-    "achievement_challenges": "string or omit"
+    // ONLY include fields you actually extracted a value for — NEVER set a field to "" or null
+    // Wrong:  "user_name": ""
+    // Right:  omit user_name entirely if you don't have a value
+    "user_name": "string",
+    "user_email": "string",
+    "user_location": "string",
+    "business_location": "string",
+    "nomination_subject": "individual|team|organization|product",
+    "org_type": "for_profit|non_profit",
+    "gender_programs_opt_in": "true|false|__skipped__",
+    "nomination_scope": "regional|global|both",
+    "description": "string",
+    "achievement_impact": "string",
+    "achievement_innovation": "string",
+    "achievement_challenges": "string"
   },
   "next_field": "user_name|user_email|user_location|business_location|nomination_subject|org_type|gender_programs_opt_in|nomination_scope|description|achievement_impact|achievement_innovation|achievement_challenges|null",
   "next_question": "...",
@@ -121,6 +124,7 @@ Return ONLY valid JSON (no markdown, no code fences):
 Rules:
 - Sound human — vary phrasing, acknowledge what they said, use their name if you have it
 - CRITICAL: Always extract the answer to your last question into updates
+- CRITICAL: Only add a field to updates if the user actually provided that value. Omit everything else.
 - Extract ALL fields you can identify from a single message (including both locations at once)
 - Ask ONE question (1-2 sentences max)
 - Don't ask for fields already collected

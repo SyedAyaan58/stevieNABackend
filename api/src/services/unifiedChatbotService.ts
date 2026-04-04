@@ -4,6 +4,7 @@ import { SessionManager } from './sessionManager';
 import { createHash } from 'crypto';
 // import { userProfileManager } from './userProfileManager'; // Removed - not pre-populating from profile
 import { recommendationEngine } from './recommendationEngine';
+import { explanationGenerator } from './explanationGenerator';
 import { cacheManager } from './cacheManager';
 import { pineconeClient } from './pineconeClient';
 import { openaiService } from './openaiService';
@@ -237,14 +238,25 @@ export class UnifiedChatbotService {
       let pendingField = (session.session_data as any).pending_field as IntakeField | null | undefined;
       let askedFields = new Set<string>((session.session_data as any).asked_fields || []);
 
-      logger.info('step_1_classifying_context');
-      const context = await contextClassifier.classifyContext({
-        message,
-        conversationHistory,
-        currentContext: undefined,
-        userContext,
-        signal,
-      });
+      // If the session has a pendingField we are mid-intake — always recommendation mode.
+      // Skip the classifier entirely (saves 1 LLM call per intake turn, ~500ms).
+      // Only classify when the conversation is fresh or a QA signal is explicitly present.
+      let context: { context: 'recommendation' | 'qa'; confidence: number; reasoning: string };
+
+      if (pendingField) {
+        // Mid-intake: skip LLM classifier entirely
+        context = { context: 'recommendation', confidence: 1.0, reasoning: 'mid-intake pending field' };
+        logger.info('context_skipped_mid_intake', { pending_field: pendingField });
+      } else {
+        logger.info('step_1_classifying_context');
+        context = await contextClassifier.classifyContext({
+          message,
+          conversationHistory,
+          currentContext: undefined,
+          userContext,
+          signal,
+        });
+      }
 
       yield { type: 'intent', intent: context.context, confidence: context.confidence };
 
@@ -396,8 +408,18 @@ export class UnifiedChatbotService {
       });
 
       // Merge extracted updates (LLM) into userContext.
+      // Strip empty strings and nulls — LLM sometimes returns "" for fields it couldn't extract,
+      // which would overwrite real values or falsely satisfy presence checks.
       if (plan.updates && Object.keys(plan.updates).length > 0) {
-        userContext = { ...userContext, ...plan.updates };
+        const cleanUpdates: Record<string, any> = {};
+        for (const [k, v] of Object.entries(plan.updates)) {
+          if (v !== null && v !== undefined && v !== '') {
+            cleanUpdates[k] = v;
+          }
+        }
+        if (Object.keys(cleanUpdates).length > 0) {
+          userContext = { ...userContext, ...cleanUpdates };
+        }
       }
 
       // Count how many optional follow-ups have been collected
@@ -520,7 +542,6 @@ export class UnifiedChatbotService {
 
         const recommendations = await recommendationEngine.generateRecommendations(contextForRecommendations as any, {
           limit: 15,
-          includeExplanations: true,
         });
 
         // Check if RAG returned no results or very low quality results
@@ -531,7 +552,6 @@ export class UnifiedChatbotService {
             description: userContext.description?.substring(0, 100)
           });
 
-          // Provide helpful fallback guidance
           const fallbackMessage = recommendations.length === 0
             ? "I'm having trouble finding exact category matches for your specific achievement. This might be because your nomination is highly specialized or uses technical terminology. Here are some options:\n\n" +
               "1. Try describing your achievement in more general terms (e.g., instead of 'IoT agricultural sensor calibration', try 'innovative technology solution for agriculture')\n\n" +
@@ -545,13 +565,31 @@ export class UnifiedChatbotService {
               "Would you like to see these results, or try a different approach?";
 
           yield { type: 'chunk', content: fallbackMessage };
-          
-          // Still return recommendations if we have any, but with the warning
+
           if (recommendations.length > 0) {
             yield { type: 'recommendations', data: recommendations, count: recommendations.length, low_confidence: true };
           }
         } else {
+          // Yield recommendations immediately — client can render the list at once.
+          // Explanations are generated async and sent as a follow-up event so the
+          // ~18s explanation LLM call doesn't block the user from seeing results.
           yield { type: 'recommendations', data: recommendations, count: recommendations.length };
+
+          // Fire explanation generation — yield result when ready
+          try {
+            const explanationsResponse = await explanationGenerator.generateExplanations({
+              userContext: contextForRecommendations,
+              categories: recommendations.map(rec => ({
+                category_id: rec.category_id,
+                category_name: rec.category_name,
+                description: rec.description,
+                program_name: rec.program_name,
+              })),
+            });
+            yield { type: 'explanations', data: explanationsResponse.explanations };
+          } catch (expErr: any) {
+            logger.warn('explanation_generation_failed_non_blocking', { error: expErr.message });
+          }
         }
       }
 

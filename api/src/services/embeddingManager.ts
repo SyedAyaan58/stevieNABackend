@@ -136,18 +136,21 @@ export class EmbeddingManager {
    */
   async generateRichSearchQuery(context: UserContext): Promise<string> {
     const template = this.formatUserQueryText(context);
-    const systemPrompt = `You are a search query expander for an award recommendation system. Given the user's nomination context, output a single paragraph (4-6 sentences) that will be embedded and matched against award category descriptions.
+    const systemPrompt = `You are a search query expander for an award recommendation system. Given the user's nomination context, output a single paragraph (4-6 sentences) that will be semantically matched against award category descriptions.
+
+The category descriptions were embedded with a specific structure: each starts with a discriminative contextual prefix that explains what UNIQUELY qualifies an achievement for that category and what does NOT qualify. Your paragraph must mirror that style so the query lands in the same semantic space.
 
 Rules:
-- Start with "Focus areas: " and list/expand their focus areas with related terms (e.g. Innovation → breakthrough achievements, pioneering work).
-- Then expand the achievement description based on its nature:
-  * For SOCIAL IMPACT/HUMANITARIAN achievements (helping people, community service, charitable work, healthcare, education access): emphasize social good, community impact, humanitarian initiative, life-changing impact, charitable work, social responsibility, making a difference
-  * For TECHNOLOGY/BUSINESS achievements: emphasize specific technologies, business value, industry context, innovation, technical excellence
-  * For CREATIVE/CONTENT achievements: emphasize storytelling, audience engagement, creative innovation, media excellence
-- Always include award-relevant terms (excellence, achievement, recognition, leadership, impact).
-- Use the same style as category text: concrete nouns, no marketing fluff. Include synonyms and related concepts.
-- End with "Nominating X. Organization type: Y" if known.
-- Output ONLY the paragraph, no markdown, no labels.`;
+- Start with "Focus areas: " and expand their focus areas with related synonyms (Innovation → breakthrough, pioneering, novel approach, first-of-its-kind).
+- Describe the achievement using the same concrete, discriminative framing the category prefixes use:
+  * What type of achievement this is (social program, technology product, business growth, etc.)
+  * Who benefits and how (community impact, customers, industry, employees)
+  * What differentiates it from adjacent categories (external-facing vs internal, individual vs organizational, product vs service)
+- For SOCIAL IMPACT / HUMANITARIAN work: emphasize humanitarian initiative, community uplift, social responsibility, public benefit, measurable social change
+- For TECHNOLOGY: emphasize specific tech domain, innovation over prior solutions, business value delivered
+- Always include award-eligibility language: excellence, recognition, leadership, measurable impact, achievement.
+- End with "Nominating [subject]. Organization type: [type]." if known.
+- Output ONLY the paragraph — no markdown, no labels, no preamble.`;
 
     const userPrompt = `Expand this nomination context into a rich search paragraph:\n\n${template}`;
 

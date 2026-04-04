@@ -1,6 +1,5 @@
 import { sqlFilterEngine, SQLFilterEngine } from './sqlFilterEngine';
 import { embeddingManager, EmbeddingManager } from './embeddingManager';
-import { explanationGenerator } from './explanationGenerator';
 import { pineconeClient } from './pineconeClient';
 import { geographyEligibilityService } from './geographyEligibilityService';
 import { getSupabaseClient } from '../config/supabase';
@@ -63,9 +62,9 @@ export class RecommendationEngine {
 
   async generateRecommendations(
     context: UserContext,
-    options: { limit?: number; includeExplanations?: boolean } = {}
+    options: { limit?: number } = {}
   ): Promise<Recommendation[]> {
-    const { limit = 10, includeExplanations = false } = options;
+    const { limit = 10 } = options;
 
     logger.info('generating_recommendations', {
       user_location: context.user_location,
@@ -193,32 +192,6 @@ export class RecommendationEngine {
           nomination_subject_type: result.metadata?.nomination_subject_type || result.nomination_subject_type,
           achievement_focus: result.metadata?.achievement_focus || result.achievement_focus,
         }));
-
-      // Step 7: Optionally enrich with explanations
-      if (includeExplanations && recommendations.length > 0) {
-        try {
-          const explanationsResponse = await explanationGenerator.generateExplanations({
-            userContext: context,
-            categories: recommendations.map(rec => ({
-              category_id: rec.category_id,
-              category_name: rec.category_name,
-              description: rec.description,
-              program_name: rec.program_name,
-            })),
-          });
-
-          const explanationsMap = new Map(
-            explanationsResponse.explanations.map(exp => [exp.category_id, exp.match_reasons])
-          );
-
-          recommendations = recommendations.map(rec => ({
-            ...rec,
-            match_reasons: explanationsMap.get(rec.category_id) || [],
-          }));
-        } catch (error: any) {
-          logger.error('explanation_generation_failed', { error: error.message });
-        }
-      }
 
       logger.info('recommendations_generated', { total_recommendations: recommendations.length });
       return recommendations;
