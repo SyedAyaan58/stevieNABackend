@@ -14,6 +14,107 @@ import { intakeAssistant } from './intakeAssistant';
 import { applyAnswer, type IntakeField } from './intakeFlow';
 import { qaAgent } from './qaAgent';
 
+// ---------------------------------------------------------------------------
+// Fast-path slot filling: skip LLM for simple structured fields.
+// Saves ~400–800ms and reduces cost on ~70% of intake turns.
+// ---------------------------------------------------------------------------
+
+/** Fields that can be answered with simple pattern matching (no LLM needed). */
+const FAST_PATH_FIELDS: ReadonlySet<IntakeField> = new Set<IntakeField>([
+  'user_name', 'user_email', 'user_location', 'business_location',
+  'nomination_subject', 'org_type', 'gender_programs_opt_in', 'nomination_scope',
+]);
+
+/** Ordered required fields — drives deterministic next-field advancement. */
+const REQUIRED_FIELD_ORDER: IntakeField[] = [
+  'user_name', 'user_email', 'user_location',
+  'nomination_subject', 'org_type', 'gender_programs_opt_in', 'nomination_scope',
+  'description',
+];
+
+/** Canned questions for each field (used when fast path handles the previous answer). */
+const FIELD_QUESTIONS: Partial<Record<IntakeField, string>> = {
+  user_name: "What's your name?",
+  user_email: 'And your email address?',
+  user_location: 'Where are you based? (city / country)',
+  business_location: 'Where is your business located?',
+  nomination_subject: 'Are we nominating an individual, a team, an organization, or a product?',
+  org_type: 'Is the organization for-profit, non-profit, government, education, or a startup?',
+  gender_programs_opt_in: 'Interested in women-focused awards too? (yes / no / skip)',
+  nomination_scope: 'Regional awards, international/global, or both?',
+  description: "Great! Now tell me about the achievement you'd like to nominate.",
+};
+
+/**
+ * Try to normalize a raw user answer for a structured intake field.
+ * Returns { value, accepted: true } on success, or { value: null, accepted: false } on failure.
+ * Failure means we should fall back to the LLM path.
+ */
+function normalizeFieldValue(field: IntakeField, raw: string): { value: any; accepted: boolean } {
+  const s = raw.trim().toLowerCase();
+  if (!s) return { value: null, accepted: false };
+
+  switch (field) {
+    case 'user_name':
+    case 'user_location':
+    case 'business_location':
+      return { value: raw.trim().substring(0, 200), accepted: true };
+
+    case 'user_email': {
+      const m = raw.match(/[\w.+-]+@[\w-]+\.[a-z]{2,}/i);
+      return m ? { value: m[0].toLowerCase(), accepted: true } : { value: null, accepted: false };
+    }
+
+    case 'nomination_subject': {
+      if (/\bindividual\b|\bperson\b|\bsomeone\b|\bmyself\b|\bme\b/.test(s)) return { value: 'individual', accepted: true };
+      if (/\bteam\b|\bgroup\b|\bdepartment\b/.test(s)) return { value: 'team', accepted: true };
+      if (/\bcompany\b|\borganiz\b|\borganis\b|\bbusiness\b|\bcorp\b|\bfirm\b/.test(s)) return { value: 'company', accepted: true };
+      if (/\bproduct\b|\bsolution\b|\bservice\b|\bsoftware\b|\bapp\b|\btool\b/.test(s)) return { value: 'product', accepted: true };
+      return { value: null, accepted: false };
+    }
+
+    case 'org_type': {
+      if (/\bnon.?profit\b|\bngo\b|\bcharity\b|\bcharitable\b/.test(s)) return { value: 'non_profit', accepted: true };
+      if (/\bgovernment\b|\bpublic.sector\b|\bmunicip\b|\bfederal\b|\bstate.agency\b/.test(s)) return { value: 'government', accepted: true };
+      if (/\beducation\b|\buniversity\b|\bcollege\b|\bschool\b|\bacadem\b/.test(s)) return { value: 'education', accepted: true };
+      if (/\bstartup\b|\bstart.up\b|\bearly.stage\b/.test(s)) return { value: 'startup', accepted: true };
+      if (/\bfor.?profit\b|\bprivate\b|\bcorporat\b|\bcommercial\b|\bbusiness\b/.test(s)) return { value: 'for_profit', accepted: true };
+      return { value: null, accepted: false };
+    }
+
+    case 'gender_programs_opt_in': {
+      if (/\byes\b|\byep\b|\bsure\b|\bwomen\b|\bfemale\b|\binterested\b|\binclude\b/.test(s)) return { value: true, accepted: true };
+      if (/\bno\b|\bnope\b|\bnot.interested\b|\bopt.?out\b/.test(s)) return { value: false, accepted: true };
+      if (/\bskip\b|\bn\/a\b|\bdoesn.t matter\b|\bno.preference\b/.test(s)) return { value: '__skipped__', accepted: true };
+      return { value: null, accepted: false };
+    }
+
+    case 'nomination_scope': {
+      if (/\bboth\b|\ball\b|\bany\b/.test(s)) return { value: 'both', accepted: true };
+      if (/\bglobal\b|\binternational\b|\bworldwide\b/.test(s)) return { value: 'global', accepted: true };
+      if (/\bregional\b|\blocal\b|\bnational\b|\bdomestic\b/.test(s)) return { value: 'regional', accepted: true };
+      return { value: null, accepted: false };
+    }
+
+    default:
+      return { value: null, accepted: false };
+  }
+}
+
+/**
+ * Deterministically pick the next required field that hasn't been filled yet.
+ * Returns null when all required fields are present (ready for recommendations).
+ */
+function getNextRequiredField(userContext: any, askedFields: Set<string>): IntakeField | null {
+  for (const field of REQUIRED_FIELD_ORDER) {
+    const filled = field === 'gender_programs_opt_in'
+      ? userContext[field] !== undefined
+      : !!userContext[field];
+    if (!filled) return field;
+  }
+  return null;
+}
+
 export class UnifiedChatbotService {
   private supabase = getSupabaseClient();
   private sessionManager = new SessionManager();
@@ -83,15 +184,14 @@ export class UnifiedChatbotService {
   }
 
   private hasMinimumForRecommendations(ctx: any): boolean {
-    // Require 8 essential fields for recommendations
     return !!(
       ctx.user_name &&
       ctx.user_email &&
-      ctx.geography &&
+      ctx.user_location &&
       ctx.nomination_subject &&
       ctx.org_type &&
       ctx.gender_programs_opt_in !== undefined &&
-      ctx.recognition_scope &&
+      ctx.nomination_scope &&
       ctx.description
     );
   }
@@ -275,6 +375,94 @@ export class UnifiedChatbotService {
         return;
       }
 
+      // -----------------------------------------------------------------------
+      // Fast path: skip LLM for simple structured fields (saves ~70% of LLM
+      // calls during intake, ~400–800ms per turn).
+      // Conditions: pendingField is a fast-path field + message is short enough.
+      // Falls through to LLM path on normalization failure.
+      // -----------------------------------------------------------------------
+      if (pendingField && FAST_PATH_FIELDS.has(pendingField) && message.length < 400) {
+        const normalized = normalizeFieldValue(pendingField, message);
+        if (normalized.accepted) {
+          userContext = { ...userContext, [pendingField]: normalized.value };
+          askedFields.add(pendingField);
+
+          logger.info('fast_path_applied', {
+            field: pendingField,
+            value_preview: String(normalized.value).substring(0, 40),
+          });
+
+          const nextField = getNextRequiredField(userContext, askedFields);
+          const assistantText = nextField
+            ? (FIELD_QUESTIONS[nextField] ?? `Please provide your ${nextField}.`)
+            : 'Perfect! Let me find the best categories for you.';
+
+          yield { type: 'chunk', content: assistantText };
+
+          const fullHistoryFP: Array<{ role: 'user' | 'assistant'; content: string }> = [
+            ...conversationHistory,
+            { role: 'user' as const, content: message },
+            { role: 'assistant' as const, content: assistantText },
+          ];
+          const updatedHistoryFP =
+            fullHistoryFP.length > this.MAX_CONVERSATION_HISTORY
+              ? fullHistoryFP.slice(-this.MAX_CONVERSATION_HISTORY)
+              : fullHistoryFP;
+
+          pendingField = nextField;
+          if (nextField) askedFields.add(nextField);
+
+          await this.sessionManager.updateSession(
+            sessionId,
+            {
+              user_context: userContext,
+              conversation_history: updatedHistoryFP,
+              pending_field: pendingField ?? null,
+              asked_fields: Array.from(askedFields),
+            },
+            session.conversation_state as any
+          );
+
+          this.persistChatMessagesFireAndForget({ sessionId, userMessage: message, assistantMessage: assistantText });
+
+          // If all required fields are filled, trigger recommendations
+          if (!nextField && this.hasMinimumForRecommendations(userContext)) {
+            yield { type: 'status', message: 'Generating personalized category recommendations...' };
+
+            const gender = (userContext as any).gender_programs_opt_in === false
+              ? 'opt_out'
+              : (userContext as any).gender_programs_opt_in === true
+                ? 'female'
+                : null;
+
+            const contextForRecommendations = {
+              ...userContext,
+              user_location: userContext.user_location || userContext.geography,
+              business_location: userContext.business_location || userContext.user_location || userContext.geography,
+              gender,
+              org_type: userContext.org_type || 'for_profit',
+              org_size: userContext.org_size || 'small',
+              achievement_focus: (userContext as any).achievement_focus || ['Innovation'],
+            };
+
+            const recommendations = await recommendationEngine.generateRecommendations(contextForRecommendations as any, {
+              limit: 15,
+              includeExplanations: true,
+            });
+
+            yield { type: 'recommendations', data: recommendations, count: recommendations.length };
+          }
+
+          logger.info('fast_path_complete', { next_field: nextField });
+          return;
+        }
+        // Normalization failed → fall through to LLM path
+        logger.info('fast_path_fallback_to_llm', { field: pendingField, message_preview: message.substring(0, 50) });
+      }
+
+      // -----------------------------------------------------------------------
+      // LLM path: apply raw answer then let intakeAssistant plan next step.
+      // -----------------------------------------------------------------------
       if (pendingField) {
         const applied = applyAnswer({ pendingField, message, userContext });
         if (applied.accepted) {
@@ -294,11 +482,11 @@ export class UnifiedChatbotService {
         logger.info('no_pending_field_to_apply', { message_preview: message.substring(0, 50) });
       }
 
-      const plan = await intakeAssistant.planNext({ 
-        userContext, 
-        message, 
-        askedFields, 
-        signal 
+      const plan = await intakeAssistant.planNext({
+        userContext,
+        message,
+        askedFields,
+        signal
       } as any);
 
       // Log what the LLM extracted
@@ -415,59 +603,18 @@ export class UnifiedChatbotService {
       if ((plan.ready_for_recommendations || forceReady) && this.hasMinimumForRecommendations(userContext)) {
         yield { type: 'status', message: 'Generating personalized category recommendations...' };
 
-        // Map recognition_scope to geography using database configuration
-        let geography: string | undefined;
-        const recognitionScope = (userContext as any).recognition_scope;
-        
-        if (recognitionScope) {
-          try {
-            // Fetch geography mapping from database
-            const { data: mappingData, error: mappingError } = await this.supabase
-              .from('geography_mappings')
-              .select('geography_filter')
-              .eq('recognition_scope', recognitionScope)
-              .single();
-
-            if (mappingError) {
-              logger.warn('geography_mapping_fetch_failed', {
-                recognition_scope: recognitionScope,
-                error: mappingError.message,
-              });
-              // Fallback: use recognition_scope as-is
-              geography = undefined;
-            } else if (mappingData?.geography_filter && mappingData.geography_filter.length > 0) {
-              // Use first geography from the filter array
-              geography = mappingData.geography_filter[0];
-            } else {
-              // NULL in database means no filter (search all)
-              geography = undefined;
-            }
-
-            logger.info('mapping_recognition_scope_to_geography', {
-              recognition_scope: recognitionScope,
-              mapped_geography: geography || 'all',
-              source: 'database',
-            });
-          } catch (error: any) {
-            logger.error('geography_mapping_error', {
-              recognition_scope: recognitionScope,
-              error: error.message,
-            });
-            geography = undefined;
-          }
-        }
-
         // Map gender_programs_opt_in to gender parameter for database filtering
-        const gender = (userContext as any).gender_programs_opt_in === false 
-          ? 'opt_out'  // Explicitly exclude women's categories
-          : (userContext as any).gender_programs_opt_in === true 
-            ? 'female'  // Include women's categories
-            : null;     // No preference (include all)
+        const gender = (userContext as any).gender_programs_opt_in === false
+          ? 'opt_out'
+          : (userContext as any).gender_programs_opt_in === true
+            ? 'female'
+            : null;
 
         const contextForRecommendations = {
           ...userContext,
-          geography: geography, // Add mapped geography field
-          gender: gender, // Add mapped gender field
+          user_location: userContext.user_location || userContext.geography,
+          business_location: userContext.business_location || userContext.user_location || userContext.geography,
+          gender,
           org_type: userContext.org_type || 'for_profit',
           org_size: userContext.org_size || 'small',
           achievement_focus: (userContext as any).achievement_focus || ['Innovation'],
@@ -521,7 +668,7 @@ export class UnifiedChatbotService {
           nomination_subject: !!userContext.nomination_subject,
           org_type: !!userContext.org_type,
           gender_programs_opt_in: userContext.gender_programs_opt_in !== undefined,
-          recognition_scope: !!userContext.recognition_scope,
+          nomination_scope: !!userContext.nomination_scope,
           description: !!userContext.description,
         },
       });

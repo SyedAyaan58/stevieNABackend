@@ -14,30 +14,39 @@ export interface UserContext {
   user_name?: string;
   user_email?: string;
 
-  // Pre-populated from user profile
-  geography?: string;
-  organization_name?: string;
-  job_title?: string;
+  // Location (dual — eligibility is based on business_location)
+  user_location?: string;
+  business_location?: string;
 
-  // Demographic layer (umbrella questions)
+  // Legacy field kept for session backward compat
+  geography?: string;
+
+  // Demographic layer
   org_type?: 'for_profit' | 'non_profit' | 'government' | 'education' | 'startup';
-  career_stage?: string;
-  gender_programs_opt_in?: boolean;
-  company_age?: string;
   org_size?: 'small' | 'medium' | 'large';
-  tech_orientation?: string;
+  gender_programs_opt_in?: boolean | '__skipped__';
+  nomination_scope?: 'regional' | 'global' | 'both';
+
+  // Legacy field kept for session backward compat
   recognition_scope?: string;
 
-  // Extracted from AI conversation
-  operating_scope?: 'local' | 'national' | 'regional' | 'global';
+  // Nomination details
   nomination_subject?: 'company' | 'individual' | 'team' | 'product';
   achievement_focus?: string[];
   description?: string;
 
-  // Achievement follow-ups (intakeFlow requires these; can be "__skipped__")
+  // Achievement follow-ups (can be "__skipped__")
   achievement_impact?: string;
   achievement_innovation?: string;
   achievement_challenges?: string;
+
+  // Profile fields (optional)
+  organization_name?: string;
+  job_title?: string;
+  career_stage?: string;
+  company_age?: string;
+  tech_orientation?: string;
+  operating_scope?: 'local' | 'national' | 'regional' | 'global';
 }
 
 /**

@@ -173,12 +173,13 @@ export class PineconeClient {
     const run = () =>
       withTimeout(
         (async () => {
-          const results = await this.client.inference.rerank(
-            'pinecone-rerank-v0',
+          const results = await this.client.inference.rerank({
+            model: 'pinecone-rerank-v0',
             query,
-            documents.map((text) => ({ text })),
-            { topN, returnDocuments: false }
-          );
+            documents: documents.map((text) => ({ text })),
+            topN,
+            returnDocuments: false,
+          });
           // results.data is sorted by relevance; each item has .index pointing to original position
           const indices = (results.data || []).map((r: any) => r.index);
           logger.info('pinecone_rerank_success', { topN, inputCount: documents.length, outputCount: indices.length });
