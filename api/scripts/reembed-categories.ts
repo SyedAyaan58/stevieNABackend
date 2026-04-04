@@ -121,6 +121,18 @@ async function generateEmbedding(text: string): Promise<number[]> {
   return response.data[0].embedding;
 }
 
+const GLOBAL_PROGRAMS = new Set(['IBA', 'WOMEN', 'TECH', 'EMPLOYERS', 'SALES']);
+
+function getGeoScope(programCode?: string): string[] {
+  if (!programCode) return ['Global'];
+  if (GLOBAL_PROGRAMS.has(programCode)) return ['Global'];
+  if (programCode === 'ABA') return ['USA'];
+  if (programCode === 'MENA') return ['Middle East', 'North Africa'];
+  if (programCode === 'APAC') return ['Asia', 'Pacific'];
+  if (programCode === 'GERMAN') return ['Germany', 'Austria', 'Switzerland'];
+  return ['Global'];
+}
+
 function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -212,12 +224,16 @@ async function main() {
               embedding,
               embedding_text: embeddingText,
               contextual_prefix: contextualPrefix,
-              // Denormalize key filter fields so they're available on the embeddings
-              // row directly — used by the program_code index + future Pinecone migration
+              // Denormalize key filter fields so they're available on the embeddings row.
+              // Global programs are open worldwide — always get ['Global'] scope.
               metadata: {
-                program_code: cat.stevie_programs?.program_code ?? null,
-                category_types: (cat.metadata?.category_types as string[] ?? []),
-                is_women_award: cat.stevie_programs?.program_code === 'WOMEN',
+                program_code:            cat.stevie_programs?.program_code ?? null,
+                is_women_award:          cat.stevie_programs?.program_code === 'WOMEN',
+                category_types:          (cat.metadata?.category_types as string[] ?? []),
+                geographic_scope:        getGeoScope(cat.stevie_programs?.program_code),
+                applicable_org_types:    (cat.applicable_org_types as string[] ?? []),
+                applicable_org_sizes:    (cat.applicable_org_sizes as string[] ?? []),
+                nomination_subject_type: cat.nomination_subject_type ?? null,
               },
             });
 
