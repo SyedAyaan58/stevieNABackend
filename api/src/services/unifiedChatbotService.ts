@@ -322,11 +322,11 @@ export class UnifiedChatbotService {
       const missingBasics: IntakeField[] = [];
       if (!userContext.user_name && !askedFields.has('user_name')) missingBasics.push('user_name');
       if (!userContext.user_email && !askedFields.has('user_email')) missingBasics.push('user_email');
-      if (!userContext.geography && !askedFields.has('geography')) missingBasics.push('geography');
+      if (!userContext.user_location && !askedFields.has('user_location')) missingBasics.push('user_location');
       if (!userContext.nomination_subject && !askedFields.has('nomination_subject')) missingBasics.push('nomination_subject');
       if (!userContext.org_type && !askedFields.has('org_type')) missingBasics.push('org_type');
       if (userContext.gender_programs_opt_in === undefined && !askedFields.has('gender_programs_opt_in')) missingBasics.push('gender_programs_opt_in');
-      if (!userContext.recognition_scope && !askedFields.has('recognition_scope')) missingBasics.push('recognition_scope');
+      if (!userContext.nomination_scope && !askedFields.has('nomination_scope')) missingBasics.push('nomination_scope');
       if (!userContext.description && !askedFields.has('description')) missingBasics.push('description');
 
       let assistantText = plan.next_question;
@@ -348,7 +348,7 @@ export class UnifiedChatbotService {
           effectiveNextField = forced;
           if (forced === 'user_name') assistantText = "What's your name?";
           else if (forced === 'user_email') assistantText = 'And your email?';
-          else if (forced === 'geography') assistantText = 'Where are you from?';
+          else if (forced === 'user_location') assistantText = 'Where are you based?';
           else if (forced === 'nomination_subject') {
             assistantText = 'Are we nominating an individual, team, organization, or product?';
           }
@@ -358,8 +358,8 @@ export class UnifiedChatbotService {
           else if (forced === 'gender_programs_opt_in') {
             assistantText = 'Interested in women-focused awards too? (yes/no/skip)';
           }
-          else if (forced === 'recognition_scope') {
-            assistantText = 'US awards, global, or both?';
+          else if (forced === 'nomination_scope') {
+            assistantText = 'Regional awards, international, or both?';
           }
           else if (forced === 'description') {
             assistantText = 'Tell me about the achievement!';

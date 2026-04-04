@@ -164,6 +164,39 @@ export class PineconeClient {
   }
 
   /**
+   * Rerank candidate documents against a query using Pinecone Rerank v0 (cross-encoder).
+   * Returns the indices of the input documents array sorted by relevance (most relevant first).
+   * Falls back to original order if reranking fails — never breaks the recommendation pipeline.
+   */
+  async rerank(query: string, documents: string[], topN: number): Promise<number[]> {
+    if (documents.length === 0) return [];
+    const run = () =>
+      withTimeout(
+        (async () => {
+          const results = await this.client.inference.rerank(
+            'pinecone-rerank-v0',
+            query,
+            documents.map((text) => ({ text })),
+            { topN, returnDocuments: false }
+          );
+          // results.data is sorted by relevance; each item has .index pointing to original position
+          const indices = (results.data || []).map((r: any) => r.index);
+          logger.info('pinecone_rerank_success', { topN, inputCount: documents.length, outputCount: indices.length });
+          return indices;
+        })(),
+        PINECONE_TIMEOUT_MS,
+        'Pinecone.rerank'
+      );
+    try {
+      return await pineconeBreaker.fire(run);
+    } catch (error: any) {
+      logger.warn('pinecone_rerank_failed_using_original_order', { error: error.message });
+      // Graceful fallback: return original order sliced to topN
+      return Array.from({ length: Math.min(topN, documents.length) }, (_, i) => i);
+    }
+  }
+
+  /**
    * Get index stats (with timeout and circuit breaker).
    */
   async getStats(): Promise<any> {

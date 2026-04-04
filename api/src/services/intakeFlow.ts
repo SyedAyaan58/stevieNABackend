@@ -34,13 +34,7 @@ export function applyAnswer(params: {
 
   if (!raw) return { updatedContext: ctx, accepted: false, error: 'empty' };
 
-  // Special handling for geography field - store raw value
-  // Mapping will be done when generating recommendations using both geography and nomination_scope
-  if (pendingField === 'geography' || pendingField === 'nomination_scope') {
-    ctx[pendingField] = raw.substring(0, 1200);
-  } else {
-    ctx[pendingField] = raw.substring(0, 1200);
-  }
+  ctx[pendingField] = raw.substring(0, 1200);
   
   return { updatedContext: ctx, accepted: true };
 }
