@@ -54,7 +54,7 @@ REQUIRED info (collect these before recommendations):
   → Ask for user_location first, then immediately follow up with business_location
   → Natural phrasing: "And where is your company or organization based? Same country or different?"
 - nomination_subject (individual|team|organization|product)
-- org_type (for_profit|non_profit)
+- org_type (for_profit|non_profit|government|education|startup)
 - gender_programs_opt_in (true|false|"__skipped__")
 - nomination_scope (regional|global|both)
 - description
@@ -108,7 +108,7 @@ Return ONLY valid JSON (no markdown, no code fences):
     "user_location": "string",
     "business_location": "string",
     "nomination_subject": "individual|team|organization|product",
-    "org_type": "for_profit|non_profit",
+    "org_type": "for_profit|non_profit|government|education|startup",
     "gender_programs_opt_in": "true|false|__skipped__",
     "nomination_scope": "regional|global|both",
     "description": "string",

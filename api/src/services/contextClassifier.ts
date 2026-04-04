@@ -275,7 +275,7 @@ export class ContextClassifier {
 
     if (context.user_name) fields.push('name');
     if (context.user_email) fields.push('email');
-    if (context.geography) fields.push('location');
+    if (context.user_location || context.geography) fields.push('location');
     if (context.org_type) fields.push('org type');
     if (context.nomination_subject) fields.push('nomination subject');
 
