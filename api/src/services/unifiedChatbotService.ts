@@ -238,15 +238,24 @@ export class UnifiedChatbotService {
       let pendingField = (session.session_data as any).pending_field as IntakeField | null | undefined;
       let askedFields = new Set<string>((session.session_data as any).asked_fields || []);
 
-      // If the session has a pendingField we are mid-intake — always recommendation mode.
-      // Skip the classifier entirely (saves 1 LLM call per intake turn, ~500ms).
-      // Only classify when the conversation is fresh or a QA signal is explicitly present.
+      // Context classification:
+      // - When pendingField is set (mid-intake), run the fast pattern classifier only.
+      //   If it confidently detects QA (e.g. user asks "what's the deadline?"), honour it.
+      //   If pattern match is inconclusive, default to recommendation (saves LLM call).
+      // - When no pendingField, run full classifier as normal.
       let context: { context: 'recommendation' | 'qa'; confidence: number; reasoning: string };
 
       if (pendingField) {
-        // Mid-intake: skip LLM classifier entirely
-        context = { context: 'recommendation', confidence: 1.0, reasoning: 'mid-intake pending field' };
-        logger.info('context_skipped_mid_intake', { pending_field: pendingField });
+        const quick = (contextClassifier as any).quickClassify(message) as { context: 'recommendation' | 'qa' | null; confidence: number };
+        if (quick.context === 'qa' && quick.confidence >= 0.80) {
+          // User asked a real question mid-intake — route to QA
+          context = { context: 'qa', confidence: quick.confidence, reasoning: 'qa pattern mid-intake' };
+          logger.info('context_mid_intake_qa_detected', { pending_field: pendingField });
+        } else {
+          // Answering intake question — no LLM needed
+          context = { context: 'recommendation', confidence: 1.0, reasoning: 'mid-intake pending field' };
+          logger.info('context_skipped_mid_intake', { pending_field: pendingField });
+        }
       } else {
         logger.info('step_1_classifying_context');
         context = await contextClassifier.classifyContext({

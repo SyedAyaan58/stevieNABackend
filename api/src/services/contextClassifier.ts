@@ -102,7 +102,7 @@ export class ContextClassifier {
    * Quick pattern-based classification (Stage 1: Fast path)
    * Returns null if no high-confidence match found
    */
-  private quickClassify(message: string): {
+  quickClassify(message: string): {
     context: ConversationContext | null;
     confidence: number;
   } {

@@ -14,18 +14,13 @@ Return ONLY valid JSON. Omit fields you didn't find. If none found, return {}.
 
 Fields:
 - user_name: string
-- user_email: string (valid)
+- user_email: string (valid email)
+- user_location: string (where the user personally lives)
+- business_location: string (where the organization is based)
 - nomination_subject: one of individual|team|organization|product
-- org_type: one of for_profit|non_profit
+- org_type: one of for_profit|non_profit|government|education|startup
 - gender_programs_opt_in: boolean or "__skipped__"
-- recognition_scope: one of us_only|global|both
-- geography: string
-- career_stage: string
-- company_age: string
-- org_size: string
-- tech_orientation: string
-- team_size: number
-- company_size: number
+- nomination_scope: one of regional|global|both
 - description: string (20-800 chars)
 - achievement_impact: string (or "__skipped__")
 - achievement_innovation: string (or "__skipped__")
@@ -80,17 +75,12 @@ export class FieldExtractor {
     const keys = [
       'user_name',
       'user_email',
+      'user_location',
+      'business_location',
       'nomination_subject',
       'org_type',
       'gender_programs_opt_in',
-      'recognition_scope',
-      'geography',
-      'career_stage',
-      'company_age',
-      'org_size',
-      'tech_orientation',
-      'team_size',
-      'company_size',
+      'nomination_scope',
       'description',
       'achievement_impact',
       'achievement_innovation',
@@ -138,21 +128,16 @@ export class FieldExtractor {
         if (email.includes('@') && email.includes('.') && email.length >= 5) cleaned.user_email = email;
       }
 
-      if (result.geography && typeof result.geography === 'string') {
-        const geo = result.geography.trim();
-        if (geo.length >= 2 && geo.length <= 160) cleaned.geography = geo;
-      }
-
-      for (const k of ['career_stage', 'company_age', 'org_size', 'tech_orientation']) {
+      for (const k of ['user_location', 'business_location']) {
         if (typeof result[k] === 'string') {
           const v = result[k].trim();
-          if (v.length >= 2 && v.length <= 160) cleaned[k] = v;
+          if (v.length >= 2 && v.length <= 200) cleaned[k] = v;
         }
       }
 
       if (typeof result.org_type === 'string') {
         const orgType = result.org_type.trim().toLowerCase();
-        if (['for_profit', 'non_profit'].includes(orgType)) cleaned.org_type = orgType;
+        if (['for_profit', 'non_profit', 'government', 'education', 'startup'].includes(orgType)) cleaned.org_type = orgType;
       }
 
       if (typeof result.gender_programs_opt_in === 'boolean') {
@@ -163,9 +148,9 @@ export class FieldExtractor {
         if (v === '__skipped__') cleaned.gender_programs_opt_in = '__skipped__';
       }
 
-      if (typeof result.recognition_scope === 'string') {
-        const r = result.recognition_scope.trim().toLowerCase();
-        if (['us_only', 'global', 'both'].includes(r)) cleaned.recognition_scope = r;
+      if (typeof result.nomination_scope === 'string') {
+        const r = result.nomination_scope.trim().toLowerCase();
+        if (['regional', 'global', 'both'].includes(r)) cleaned.nomination_scope = r;
       }
 
       if (result.nomination_subject) {
@@ -173,24 +158,6 @@ export class FieldExtractor {
         const v = String(result.nomination_subject).toLowerCase();
         if (valid.includes(v)) cleaned.nomination_subject = v;
       }
-
-      const toNumber = (v: any): number | null => {
-        if (typeof v === 'number' && Number.isFinite(v)) return v;
-        if (typeof v === 'string') {
-          const m = v.match(/(\d{1,9})/);
-          if (m) {
-            const n = parseInt(m[1], 10);
-            return Number.isFinite(n) ? n : null;
-          }
-        }
-        return null;
-      };
-
-      const teamN = toNumber(result.team_size);
-      if (teamN !== null) cleaned.team_size = teamN;
-
-      const companyN = toNumber(result.company_size);
-      if (companyN !== null) cleaned.company_size = companyN;
 
       if (typeof result.description === 'string') {
         const desc = result.description.trim();
