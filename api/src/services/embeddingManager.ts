@@ -46,8 +46,10 @@ interface SimilarityResult {
     applicable_org_sizes: string[];
     achievement_focus: string[];
     geographic_scope: string[];
+    category_types?: string[];
     is_free: boolean;
     gender_requirement?: string;
+    [key: string]: any;
   };
 }
 
@@ -104,28 +106,23 @@ export class EmbeddingManager {
   /**
    * Format user query to mirror category text structure so query and documents
    * live in the same semantic space (same phrasing: "Focus areas:", "Nominating", etc.).
-   * Optionally enriches with synonyms for better semantic overlap (see expandQuerySynonyms).
+   * Used as fallback when HyDE (generateRichSearchQuery) is disabled or fails.
    */
-  formatUserQueryText(context: UserContext, enrichWithSynonyms: boolean = true): string {
+  formatUserQueryText(context: UserContext): string {
     const parts: string[] = [];
 
-    // Focus areas first (same order as formatCategoryText)
     if (context.achievement_focus && context.achievement_focus.length > 0) {
-      const focus = context.achievement_focus.join(", ");
-      parts.push(`Focus areas: ${enrichWithSynonyms ? this.expandFocusAreas(focus) : focus}.`);
+      parts.push(`Focus areas: ${context.achievement_focus.join(", ")}.`);
     }
 
-    // Achievement description (main semantic content); enrich with related terms for better match
     if (context.description) {
-      parts.push(enrichWithSynonyms ? this.expandDescriptionForSearch(context.description) : context.description);
+      parts.push(context.description);
     }
 
-    // Nomination subject (same phrasing as category side)
     if (context.nomination_subject) {
       parts.push(`Nominating ${context.nomination_subject}.`);
     }
 
-    // Optional: org type/size so "Eligible for" style match
     if (context.org_type) {
       parts.push(`Organization type: ${context.org_type}.`);
     }
@@ -134,41 +131,11 @@ export class EmbeddingManager {
   }
 
   /**
-   * Expand focus area phrases with related terms for better semantic overlap with category embeddings.
-   */
-  private expandFocusAreas(focus: string): string {
-    const lower = focus.toLowerCase();
-    const additions: string[] = [];
-    if (lower.includes("innovation")) additions.push("breakthrough achievements", "pioneering work");
-    if (lower.includes("technology") || lower.includes("tech")) additions.push("technology excellence", "technical achievement");
-    if (lower.includes("artificial intelligence") || lower.includes("ai ")) additions.push("machine learning", "intelligent systems");
-    if (lower.includes("customer service")) additions.push("client satisfaction", "customer experience");
-    if (lower.includes("product")) additions.push("product excellence", "product innovation", "new product");
-    if (lower.includes("marketing")) additions.push("marketing excellence", "brand", "growth");
-    if (additions.length === 0) return focus;
-    return [focus, ...additions].join(". ");
-  }
-
-  /**
-   * Expand description with related keywords so short/generic descriptions match category text better.
-   */
-  private expandDescriptionForSearch(description: string): string {
-    const lower = description.toLowerCase();
-    const terms: string[] = [description];
-    if (lower.includes("ai ") || lower.includes("artificial intelligence")) terms.push("machine learning", "intelligent systems", "technology innovation");
-    if (lower.includes("product")) terms.push("product development", "product excellence", "innovation");
-    if (lower.includes("team")) terms.push("team achievement", "collaboration", "excellence");
-    if (lower.includes("customer") || lower.includes("client")) terms.push("customer service", "client satisfaction");
-    if (lower.includes("award") || lower.includes("won") || lower.includes("winner")) terms.push("excellence", "achievement", "recognition");
-    return terms.join(". ");
-  }
-
-  /**
    * Use LLM to generate a rich search query from user context (more synonyms, context, award-relevant terms).
    * Improves semantic match when category embeddings are generic. Set RICH_QUERY_EXPANSION=true to enable.
    */
   async generateRichSearchQuery(context: UserContext): Promise<string> {
-    const template = this.formatUserQueryText(context, false);
+    const template = this.formatUserQueryText(context);
     const systemPrompt = `You are a search query expander for an award recommendation system. Given the user's nomination context, output a single paragraph (4-6 sentences) that will be embedded and matched against award category descriptions.
 
 Rules:
@@ -202,7 +169,7 @@ Rules:
     } catch (error: any) {
       logger.warn("rich_query_expansion_failed", { error: error.message });
     }
-    return this.formatUserQueryText(context, true);
+    return this.formatUserQueryText(context);
   }
 
   /**
@@ -247,30 +214,19 @@ Rules:
    * When RICH_QUERY_EXPANSION=true, uses LLM to expand context into a richer paragraph for better semantic match.
    * Otherwise uses template-based query with synonym expansion.
    */
-  async generateUserEmbedding(context: UserContext): Promise<number[]> {
-    const useRichExpansion = process.env.RICH_QUERY_EXPANSION === "true" || process.env.RICH_QUERY_EXPANSION === "1";
-    const queryText = useRichExpansion
-      ? await this.generateRichSearchQuery(context)
-      : this.formatUserQueryText(context, true);
-    
-    // Log the full query text for debugging
-    if (useRichExpansion) {
-      logger.info("HYDE_DOCUMENT_GENERATED", {
-        full_text: queryText,
-        length: queryText.length
-      });
-      console.log('\n' + '='.repeat(80));
-      console.log('🎯 HyDE GENERATED DOCUMENT:');
-      console.log('='.repeat(80));
-      console.log(queryText);
-      console.log('='.repeat(80) + '\n');
-    }
-    
+  async generateUserEmbedding(context: UserContext): Promise<{ embedding: number[]; expandedQuery: string }> {
+    // HyDE is always on. Set DISABLE_RICH_EXPANSION=true only to bypass for debugging.
+    const disabled = process.env.DISABLE_RICH_EXPANSION === "true";
+    const expandedQuery = disabled
+      ? this.formatUserQueryText(context)
+      : await this.generateRichSearchQuery(context);
+
     logger.info("generated_search_query", {
-      text: queryText.substring(0, 500), // Increased from 300 to 500 for better visibility
-      rich_expansion: useRichExpansion,
+      text: expandedQuery.substring(0, 300),
+      hyde: !disabled,
     });
-    return this.generateEmbedding(queryText);
+    const embedding = await this.generateEmbedding(expandedQuery);
+    return { embedding, expandedQuery };
   }
 
   /**
@@ -473,39 +429,32 @@ Return ONLY a JSON array of 1-2 category types, e.g.: ["healthcare_medical", "so
 
   /**
    * Perform similarity search using pgvector.
-   * REVERTED TO WORKING VERSION (migration 002) - only filters by geography and gender.
+   * Filters by geography and gender only — semantic matching handles the rest.
    */
   async performSimilaritySearch(
     userEmbedding: number[],
-    userGeographies?: string[], // Array but we'll use first element only
-    _userNominationSubject?: string, // Unused - kept for backward compatibility
+    eligibleProgramCodes?: string[],
     limit: number = 10,
-    _userOrgType?: string, // Unused - kept for backward compatibility
     userAchievementFocus?: string[],
     userGender?: string
   ): Promise<SimilarityResult[]> {
-    // Use single geography (first element) for old function signature
-    const userGeography = userGeographies?.[0] || null;
-    
     logger.info("performing_similarity_search", {
-      user_geography: userGeography || "all",
+      eligible_programs: eligibleProgramCodes?.join(", ") || "all",
       user_achievement_focus: userAchievementFocus?.join(", ") || "all",
       user_gender: userGender || "any",
-      limit: limit,
+      limit,
       embedding_dimension: userEmbedding.length,
-      note: "REVERTED TO WORKING VERSION - migration 002 function signature"
     });
 
     try {
-      // Call old working function (migration 002)
       const { data, error } = await this.client.rpc(
         "search_similar_categories",
         {
           query_embedding: userEmbedding,
-          user_geography: userGeography,
-          user_nomination_subject: null, // Not used
+          eligible_program_codes: eligibleProgramCodes || null,
+          user_nomination_subject: null,
           match_limit: limit,
-          user_org_type: null, // Not used
+          user_org_type: null,
           user_achievement_focus: userAchievementFocus || null,
           user_gender: userGender || 'any',
         },
@@ -547,6 +496,54 @@ Return ONLY a JSON array of 1-2 category types, e.g.: ["healthcare_medical", "so
   }
 
   /**
+   * Generate a specific, discriminative contextual prefix for a category using LLM.
+   * Unlike the template-based prefix that was identical across categories in the same program,
+   * this describes what uniquely qualifies (and disqualifies) an achievement for THIS category.
+   * Stored in the contextual_prefix column, which the SQL scoring function boosts against.
+   */
+  async generateContextualPrefix(category: Category): Promise<string> {
+    const categoryText = this.formatCategoryText(category);
+    const systemPrompt = `You are helping build a semantic search index for Stevie Awards categories.
+Your task: write a 2-3 sentence contextual description for ONE award category that makes it uniquely identifiable and distinguishable from similar categories in the same program.
+
+Rules:
+- Describe SPECIFICALLY what type of achievement qualifies (be concrete, not generic)
+- Include one sentence on what does NOT qualify or what differentiates this from adjacent categories
+- Mention the most important eligibility differentiator (internal vs external, product vs service, individual vs team, etc.)
+- Do NOT repeat the category name verbatim — rephrase with synonyms
+- Output ONLY the 2-3 sentences, no labels, no markdown`;
+
+    const userPrompt = `Category data:\n${categoryText}\n\nWrite the discriminative contextual description:`;
+
+    try {
+      const prefix = await openaiService.chatCompletion({
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        model: 'gpt-4o-mini',
+        temperature: 0.1,
+        maxTokens: 150,
+      });
+      const trimmed = (prefix || '').trim();
+      if (trimmed.length > 20) {
+        logger.info('contextual_prefix_generated', {
+          category_name: category.category_name,
+          prefix_length: trimmed.length,
+        });
+        return trimmed;
+      }
+    } catch (error: any) {
+      logger.warn('contextual_prefix_generation_failed', {
+        category_name: category.category_name,
+        error: error.message,
+      });
+    }
+    // Fallback: structured template (better than nothing)
+    return `This is a ${category.program_name} award recognizing ${category.category_name.toLowerCase()}. Eligible for ${(category.applicable_org_types || []).join(' and ')} organizations focused on ${(category.achievement_focus || []).join(', ')}.`;
+  }
+
+  /**
    * Precompute and store embedding for a category.
    * Used during data ingestion.
    */
@@ -557,17 +554,24 @@ Return ONLY a JSON array of 1-2 category types, e.g.: ["healthcare_medical", "so
     });
 
     try {
-      // Format category text
-      const categoryText = this.formatCategoryText(category);
+      // Generate LLM contextual prefix (specific, discriminative — not template-based)
+      const contextualPrefix = await this.generateContextualPrefix(category);
 
-      // Generate embedding
+      // Format structured category text
+      const structuredText = this.formatCategoryText(category);
+
+      // Full embedding text: contextual prefix situates the chunk, structured text provides signal
+      const categoryText = `${contextualPrefix}\n\n${structuredText}`;
+
+      // Generate embedding of combined text
       const embedding = await this.generateEmbedding(categoryText);
 
-      // Store in database
+      // Store in database — contextual_prefix column now populated for SQL keyword boost
       const { error } = await this.client.from("category_embeddings").upsert({
         category_id: category.category_id,
         embedding: embedding,
         embedding_text: categoryText,
+        contextual_prefix: contextualPrefix,
       });
 
       if (error) {

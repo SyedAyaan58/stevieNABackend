@@ -1,12 +1,10 @@
 /**
  * QA Agent using OpenAI Function Calling (Native)
- * 
- * Replaces LangChain to avoid 1,556 type definition files that cause OOM during compilation
- * 
- * The LLM decides when to:
- * 1. Search the knowledge base (for general award information)
- * 2. Use web search (for specific event details, deadlines, locations)
- * 3. Answer directly (for simple questions)
+ *
+ * All OpenAI calls go through openaiService (circuit breaker, retry, queue, token tracking).
+ * Tool calls execute in parallel (Promise.all).
+ * Tool result payloads are capped at 6000 chars (~1500 tokens) to prevent context bloat.
+ * KB search passes a program filter when the query mentions a specific program.
  */
 
 import OpenAI from 'openai';
@@ -17,9 +15,7 @@ import { webSearchService } from './webSearchService';
 import { jinaReader } from './crawler/jinaReader';
 import logger from '../utils/logger';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const MAX_TOOL_RESULT_CHARS = 6000; // ~1500 tokens — prevents context window bloat
 
 // Define tools for function calling
 const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
@@ -109,11 +105,6 @@ If a user asks something completely unrelated to Stevie Awards (e.g., weather, s
 - Provide contact: help@stevieawards.com
 - Redirect back to Stevie Awards topics
 
-Example response:
-"I'm having trouble answering that question as it's outside my area of expertise. I'm specifically designed to help with Stevie Awards information, categories, and nominations. For questions beyond this scope, please contact help@stevieawards.com for further assistance.
-
-Is there anything about the Stevie Awards I can help you with?"
-
 ANSWER FORMATTING:
 When answering questions:
 1. Provide clear, accurate information
@@ -125,41 +116,48 @@ GUIDING TO RECOMMENDATIONS:
 After answering a question, naturally guide users toward personalized recommendations:
 - "Would you like me to help you find the right categories for your specific achievements?"
 - "I can provide personalized category recommendations based on your organization's accomplishments. Would that be helpful?"
-- "Based on what you're looking for, I can suggest specific award categories that might be a good fit. Interested?"
 
 Keep the transition natural and conversational, not pushy.`;
 
+/** Detect which Stevie program a query is specifically about, for KB metadata filtering. */
+function detectProgram(query: string): string | undefined {
+  const q = query.toLowerCase();
+  if (q.includes('american business') || /\baba\b/.test(q)) return 'ABA';
+  if (q.includes('international business') || /\biba\b/.test(q)) return 'IBA';
+  if (/\bmena\b/.test(q) || q.includes('middle east')) return 'MENA';
+  if (q.includes('asia-pacific') || q.includes('asia pacific') || /\bapac\b/.test(q)) return 'APAC';
+  if (q.includes('german') || /\bgsa\b/.test(q)) return 'GERMAN';
+  if (q.includes('technology excellence') || /\bsate\b/.test(q)) return 'TECH';
+  if (q.includes('great employers') || /\bsage\b/.test(q)) return 'EMPLOYERS';
+  if (q.includes('sales') && q.includes('customer service')) return 'SALES';
+  if (q.includes('women in business') || /\bsawib\b/.test(q)) return 'WOMEN';
+  return undefined;
+}
+
 export class QAAgent {
-  /**
-   * Process a user query with function calling
-   */
   async query(userQuery: string, conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }> = []): Promise<string> {
     logger.info('qa_agent_query_start', { query: userQuery });
 
     try {
-      // Build messages array
       const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
         { role: 'system', content: systemPrompt },
-        ...conversationHistory.map(msg => ({
-          role: msg.role,
-          content: msg.content,
-        })),
+        ...conversationHistory.map(msg => ({ role: msg.role, content: msg.content })),
         { role: 'user', content: userQuery },
       ];
 
-      // Initial API call
-      let response = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+      // Initial call — through openaiService (circuit breaker + retry + queue + token tracking)
+      let response = await openaiService.chatCompletionRaw({
         messages,
+        model: 'gpt-4o-mini',
         tools,
-        tool_choice: 'auto',
+        toolChoice: 'auto',
         temperature: 0.3,
+        maxTokens: 1000,
       });
 
       let iterations = 0;
       const maxIterations = 5;
 
-      // Handle function calls in a loop
       while (response.choices[0].message.tool_calls && iterations < maxIterations) {
         iterations++;
         const toolCalls = response.choices[0].message.tool_calls;
@@ -170,54 +168,59 @@ export class QAAgent {
           tools: toolCalls.map(tc => tc.function.name),
         });
 
-        // Add assistant message with tool calls
+        // Add assistant message with tool_calls
         messages.push(response.choices[0].message);
 
-        // Execute each tool call
-        for (const toolCall of toolCalls) {
-          const functionName = toolCall.function.name;
-          const functionArgs = JSON.parse(toolCall.function.arguments);
+        // Execute all tool calls in parallel (B5)
+        const toolResults = await Promise.all(
+          toolCalls.map(async (toolCall) => {
+            const functionName = toolCall.function.name;
+            const functionArgs = JSON.parse(toolCall.function.arguments);
 
-          logger.info('qa_agent_executing_tool', {
-            tool: functionName,
-            args: functionArgs,
-          });
+            logger.info('qa_agent_executing_tool', { tool: functionName, args: functionArgs });
 
-          let functionResult: string;
-
-          try {
-            if (functionName === 'search_knowledge_base') {
-              functionResult = await this.searchKnowledgeBase(functionArgs.query);
-            } else if (functionName === 'search_stevie_website') {
-              functionResult = await this.searchStevieWebsite(functionArgs.query);
-            } else if (functionName === 'search_web') {
-              functionResult = await this.searchWeb(functionArgs.query);
-            } else {
-              functionResult = JSON.stringify({ error: 'Unknown function' });
+            let result: string;
+            try {
+              if (functionName === 'search_knowledge_base') {
+                result = await this.searchKnowledgeBase(functionArgs.query);
+              } else if (functionName === 'search_stevie_website') {
+                result = await this.searchStevieWebsite(functionArgs.query);
+              } else if (functionName === 'search_web') {
+                result = await this.searchWeb(functionArgs.query);
+              } else {
+                result = JSON.stringify({ error: 'Unknown function' });
+              }
+            } catch (error: any) {
+              logger.error('qa_agent_tool_error', { tool: functionName, error: error.message });
+              result = JSON.stringify({ error: error.message });
             }
-          } catch (error: any) {
-            logger.error('qa_agent_tool_error', {
-              tool: functionName,
-              error: error.message,
-            });
-            functionResult = JSON.stringify({ error: error.message });
-          }
 
-          // Add function result to messages
+            // Cap each tool result to prevent context window bloat (B8)
+            const capped = result.length > MAX_TOOL_RESULT_CHARS
+              ? result.substring(0, MAX_TOOL_RESULT_CHARS)
+              : result;
+
+            return { toolCall, result: capped };
+          })
+        );
+
+        // Push all tool results to messages
+        for (const { toolCall, result } of toolResults) {
           messages.push({
             role: 'tool',
             tool_call_id: toolCall.id,
-            content: functionResult,
+            content: result,
           });
         }
 
-        // Get next response
-        response = await openai.chat.completions.create({
-          model: 'gpt-4o-mini',
+        // Follow-up call — also through openaiService
+        response = await openaiService.chatCompletionRaw({
           messages,
+          model: 'gpt-4o-mini',
           tools,
-          tool_choice: 'auto',
+          toolChoice: 'auto',
           temperature: 0.3,
+          maxTokens: 1000,
         });
       }
 
@@ -231,74 +234,48 @@ export class QAAgent {
 
       return finalAnswer;
     } catch (error: any) {
-      logger.error('qa_agent_query_error', {
-        query: userQuery,
-        error: error.message,
-      });
+      logger.error('qa_agent_query_error', { query: userQuery, error: error.message });
       throw error;
     }
   }
 
-  /**
-   * Search knowledge base tool implementation
-   */
   private async searchKnowledgeBase(query: string): Promise<string> {
     try {
-      // Generate embedding for the query
       const embedding = await openaiService.generateEmbedding(query);
 
-      // Search Pinecone
-      const results = await pineconeClient.query(embedding, 5);
+      // Pass program filter when query is about a specific program (B10)
+      const detectedProgram = detectProgram(query);
+      const filter = detectedProgram ? { program: detectedProgram } : undefined;
+      const results = await pineconeClient.query(embedding, 5, filter);
 
       if (!results || results.length === 0) {
-        return JSON.stringify({
-          success: false,
-          message: 'No relevant information found in knowledge base',
-        });
+        return JSON.stringify({ success: false, message: 'No relevant information found in knowledge base' });
       }
 
-      // Format results
       const formattedResults = results.map((match: any) => ({
         content: match.metadata?.text || match.metadata?.content || '',
         score: match.score,
         source: match.metadata?.source || 'Knowledge Base',
       }));
 
-      return JSON.stringify({
-        success: true,
-        results: formattedResults,
-      });
+      return JSON.stringify({ success: true, results: formattedResults });
     } catch (error: any) {
       logger.error('search_knowledge_base_error', { error: error.message });
-      return JSON.stringify({
-        success: false,
-        error: error.message,
-      });
+      return JSON.stringify({ success: false, error: error.message });
     }
   }
 
-  /**
-   * Search Stevie Awards website tool implementation
-   */
   private async searchStevieWebsite(query: string): Promise<string> {
     try {
-      // Use Tavily to search specifically on stevieawards.com
-      const searchResults = await webSearchService.search(`site:stevieawards.com ${query}`, {
-        maxResults: 5,
-      });
+      const searchResults = await webSearchService.search(`site:stevieawards.com ${query}`, { maxResults: 5 });
 
       if (!searchResults.results || searchResults.results.length === 0) {
-        return JSON.stringify({
-          success: false,
-          message: 'No relevant information found on stevieawards.com',
-        });
+        return JSON.stringify({ success: false, message: 'No relevant information found on stevieawards.com' });
       }
 
-      // Scrape the top results
       const urlsToScrape = searchResults.results.slice(0, 3).map(r => r.url);
       const scrapedResults = await jinaReader.scrapeMultiple(urlsToScrape);
 
-      // Filter and format results - include URL in content for better context
       const formattedResults = scrapedResults.map(result => ({
         title: result.title,
         url: result.url,
@@ -313,49 +290,28 @@ export class QAAgent {
       });
     } catch (error: any) {
       logger.error('search_stevie_website_error', { error: error.message });
-      return JSON.stringify({
-        success: false,
-        error: error.message,
-      });
+      return JSON.stringify({ success: false, error: error.message });
     }
   }
 
-  /**
-   * Web search tool implementation
-   */
   private async searchWeb(query: string): Promise<string> {
     try {
-      // Search web and scrape top results
-      const searchResults = await webSearchService.searchAndScrape(query, {
-        maxResults: 5,
-        maxScrape: 3,
-      });
+      const searchResults = await webSearchService.searchAndScrape(query, { maxResults: 5, maxScrape: 3 });
 
       if (!searchResults.scrapedContent || searchResults.scrapedContent.length === 0) {
-        return JSON.stringify({
-          success: false,
-          message: 'No relevant web results found',
-        });
+        return JSON.stringify({ success: false, message: 'No relevant web results found' });
       }
 
-      // Format results
       const formattedResults = searchResults.scrapedContent.map(result => ({
         title: result.title,
         url: result.url,
-        content: result.content.substring(0, 2000), // Limit content length
+        content: result.content.substring(0, 2000),
       }));
 
-      return JSON.stringify({
-        success: true,
-        results: formattedResults,
-        answer: searchResults.answer,
-      });
+      return JSON.stringify({ success: true, results: formattedResults, answer: searchResults.answer });
     } catch (error: any) {
       logger.error('search_web_error', { error: error.message });
-      return JSON.stringify({
-        success: false,
-        error: error.message,
-      });
+      return JSON.stringify({ success: false, error: error.message });
     }
   }
 }

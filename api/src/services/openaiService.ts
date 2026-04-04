@@ -104,6 +104,47 @@ export class OpenAIService {
     }
   }
 
+  /**
+   * Raw chat completion supporting tool calling, tool messages, and full response access.
+   * Routes through the same circuit breaker, retry, queue, and token tracking as chatCompletion.
+   * Use this for agentic loops that need to inspect tool_calls on the response.
+   */
+  async chatCompletionRaw(params: {
+    messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
+    model?: string;
+    temperature?: number;
+    maxTokens?: number;
+    tools?: OpenAI.Chat.Completions.ChatCompletionTool[];
+    toolChoice?: OpenAI.Chat.Completions.ChatCompletionToolChoiceOption;
+    signal?: AbortSignal;
+    priority?: QueuePriority;
+  }): Promise<OpenAI.Chat.Completions.ChatCompletion> {
+    const { messages, model = 'gpt-4o-mini', temperature = 0.7, maxTokens = 1000, tools, toolChoice, signal, priority = QueuePriority.QA } = params;
+    try {
+      const client = this.getClient();
+      const r = await openaiRequestQueue.enqueue(
+        () => openaiCircuitBreaker.fire(() =>
+          retryWithBackoff(() =>
+            client.chat.completions.create(
+              { model, messages, temperature, max_tokens: maxTokens, tools, tool_choice: toolChoice },
+              signal ? { signal } : undefined
+            )
+          )
+        ),
+        priority
+      );
+      if (r?.usage) {
+        openaiTokensTotal.inc({ type: 'prompt' }, r.usage.prompt_tokens ?? 0);
+        openaiTokensTotal.inc({ type: 'completion' }, r.usage.completion_tokens ?? 0);
+      }
+      return r;
+    } catch (error: any) {
+      if (isAbortError(error)) throw error;
+      logger.error('openai_chat_completion_raw_error', { error: error.message, model });
+      throw error;
+    }
+  }
+
   async *chatCompletionStream(params: {
     messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
     model?: string;

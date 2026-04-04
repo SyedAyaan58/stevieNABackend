@@ -1,11 +1,11 @@
 export type IntakeField =
   | 'user_name'
   | 'user_email'
+  | 'user_location'
+  | 'business_location'
   | 'nomination_subject'
   | 'org_type'
   | 'gender_programs_opt_in'
-  | 'recognition_scope'
-  | 'geography'
   | 'nomination_scope'
   | 'description'
   | 'achievement_impact'

@@ -12,17 +12,25 @@ export type IntakeAssistantPlanResult = {
 const INTAKE_FIELDS: IntakeField[] = [
   'user_name',
   'user_email',
+  'user_location',
+  'business_location',
   'nomination_subject',
   'org_type',
   'gender_programs_opt_in',
-  'recognition_scope',
-  'geography',
   'nomination_scope',
   'description',
   'achievement_impact',
   'achievement_innovation',
   'achievement_challenges',
 ];
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const HTML_TAG_REGEX = /<[^>]*>/g;
+
+function sanitize(value: any): any {
+  if (typeof value === 'string') return value.replace(HTML_TAG_REGEX, '').substring(0, 1200);
+  return value;
+}
 
 function buildPrompt(params: { userContext: any; message: string }): string {
   const { userContext, message } = params;
@@ -40,12 +48,15 @@ Look at what you already know and what the user just said. Extract any info and 
 REQUIRED info (collect these before recommendations):
 - user_name
 - user_email
-- geography (where they're from - helps filter relevant awards)
-- nomination_scope (regional|global|both - where they want to nominate)
+- user_location (where the USER personally lives — city, country, or region)
+- business_location (where the ORGANIZATION or COMPANY is based — may differ from user location)
+  → CRITICAL: Extract BOTH if mentioned in the same message
+  → Ask for user_location first, then immediately follow up with business_location
+  → Natural phrasing: "And where is your company or organization based? Same country or different?"
 - nomination_subject (individual|team|organization|product)
 - org_type (for_profit|non_profit)
 - gender_programs_opt_in (true|false|"__skipped__")
-- recognition_scope (us_only|global|both)
+- nomination_scope (regional|global|both)
 - description
 
 OPTIONAL follow-ups (ask 1-2 ONLY after description to enrich):
@@ -56,26 +67,25 @@ OPTIONAL follow-ups (ask 1-2 ONLY after description to enrich):
 Allowed field names:
 ${INTAKE_FIELDS.join(', ')}
 
-HOW TO ASK NATURALLY (vary your phrasing, reference context):
+HOW TO ASK NATURALLY:
 - user_name: "What's your name?" / "And you are?" / "Who should I put down for this?"
-- user_email: "What's your email?" / "And your email address?" / "Email?"
-- geography: "Where are you from?" / "What's your location?" / "Which country/region are you in?" / "Where are you based?"
-- nomination_scope: "Would you like to nominate for regional awards, international awards, or both?" / "Regional or global awards?" / "Just your region or worldwide?"
-- nomination_subject: "Got it! Are we nominating an individual, a team, an organization, or a product?" / "Is this for a person, team, company, or product?"
-- org_type: "Is this a for-profit or non-profit?" / "For-profit company or non-profit organization?" / "Profit or non-profit?"
-- gender_programs_opt_in: "Interested in women-focused awards too?" / "Would you like to be considered for women's leadership categories? (yes/no/skip)" / "Want to include women-specific awards?"
-- recognition_scope: "Are you looking at US awards, international, or both?" / "US-only or global awards?" / "Interested in just US awards or worldwide?"
-- description: "Tell me about the achievement!" / "What makes this special?" / "What did they accomplish?" / "What's the story here?"
-- achievement_impact: "What kind of impact did this have?" / "Any measurable results?" / "How did this affect people or the business?"
-- achievement_innovation: "What made this innovative?" / "What was unique about this approach?" / "What set this apart?"
-- achievement_challenges: "What obstacles did they overcome?" / "Any challenges along the way?" / "What made this difficult?"
+- user_email: "What's your email?" / "And your email address?"
+- user_location: "Where are you based?" / "Which country or city are you in?" / "Where are you located?"
+- business_location: "And where is your company or organization based?" / "Is the business in the same country?" / "Where is the organization registered or operating from?"
+- nomination_subject: "Are we nominating an individual, a team, an organization, or a product?"
+- org_type: "Is this a for-profit or non-profit?"
+- gender_programs_opt_in: "Interested in women-focused awards too? (yes/no/skip)"
+- nomination_scope: "Regional awards, international awards, or both?"
+- description: "Tell me about the achievement!" / "What did they accomplish?"
+- achievement_impact: "What kind of impact did this have?" / "Any measurable results?"
+- achievement_innovation: "What made this innovative or unique?"
+- achievement_challenges: "What obstacles did they overcome?"
 
-CONTEXT-AWARE EXAMPLES:
-- If they mention "team" → "Great! What's your name?"
-- If they give name → "Thanks [name]! What's your email?"
-- If they give email → "Perfect! Where are you from? This helps us find the most relevant awards for you."
-- If they describe achievement → "That sounds impressive! What kind of impact did it have?"
-- After 1 follow-up → "Perfect! Let me find the best categories for you."
+TWO-LOCATION EXTRACTION EXAMPLES:
+- "I'm in London but my company is based in Dubai" → user_location: "London, UK", business_location: "Dubai, UAE"
+- "We're a US company, I work from India" → user_location: "India", business_location: "USA"
+- "Mumbai" (no business context mentioned yet) → user_location: "Mumbai, India", business_location: null (ask next)
+- "Singapore" → user_location: "Singapore", then ask business_location separately
 
 Email validation rule:
 - If user_email exists but invalid (no @ or no . after @), set next_field="user_email" and next_question EXACTLY:
@@ -87,33 +97,37 @@ ${contextSummary || 'Just starting'}
 User just said:
 "${message}"
 
-Return ONLY valid JSON:
+Return ONLY valid JSON (no markdown, no code fences):
 {
-  "updates": {"field": "value"},
-  "next_field": "user_name" | "user_email" | "nomination_subject" | "org_type" | "gender_programs_opt_in" | "recognition_scope" | "geography" | "nomination_scope" | "description" | "achievement_impact" | "achievement_innovation" | "achievement_challenges" | null,
+  "updates": {
+    "user_name": "string or omit",
+    "user_email": "string or omit",
+    "user_location": "string or omit",
+    "business_location": "string or null or omit",
+    "nomination_subject": "individual|team|organization|product or omit",
+    "org_type": "for_profit|non_profit or omit",
+    "gender_programs_opt_in": "true|false|__skipped__ or omit",
+    "nomination_scope": "regional|global|both or omit",
+    "description": "string or omit",
+    "achievement_impact": "string or omit",
+    "achievement_innovation": "string or omit",
+    "achievement_challenges": "string or omit"
+  },
+  "next_field": "user_name|user_email|user_location|business_location|nomination_subject|org_type|gender_programs_opt_in|nomination_scope|description|achievement_impact|achievement_innovation|achievement_challenges|null",
   "next_question": "...",
   "ready_for_recommendations": true|false
 }
 
 Rules:
-- Sound human - vary phrasing, acknowledge what they said, use their name if you have it
-- CRITICAL: Always extract the answer to your last question into updates! If you just asked for name and they gave "John", put {"user_name": "John"} in updates
-- Extract ALL fields you can identify from their message
-- Ask ONE question (1-2 sentences)
+- Sound human — vary phrasing, acknowledge what they said, use their name if you have it
+- CRITICAL: Always extract the answer to your last question into updates
+- Extract ALL fields you can identify from a single message (including both locations at once)
+- Ask ONE question (1-2 sentences max)
 - Don't ask for fields already collected
 - After description, ask 1-2 optional follow-ups max (not all 3)
-- When ready: "Perfect! Let me find the best categories for you." or similar
-- No markdown
-
-EXTRACTION EXAMPLES:
-- You asked for name, they said "John Smith" → updates: {"user_name": "John Smith"}
-- You asked for email, they said "john@example.com" → updates: {"user_email": "john@example.com"}
-- You asked org type, they said "for-profit" → updates: {"org_type": "for_profit"}
-- You asked women awards, they said "yes" → updates: {"gender_programs_opt_in": true}
-- You asked scope, they said "both" → updates: {"recognition_scope": "both"}
-- They describe achievement → updates: {"description": "their description text"}`;
+- When ready: "Perfect! Let me find the best categories for you."
+- No markdown in next_question`;
 }
-
 
 export class IntakeAssistant {
   async planNext(params: { userContext: any; message: string; signal?: AbortSignal }): Promise<IntakeAssistantPlanResult> {
@@ -124,11 +138,12 @@ export class IntakeAssistant {
     const raw = await openaiService.chatCompletion({
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.2,
-      maxTokens: 400,
+      maxTokens: 500,
       signal,
     });
 
-    let text = raw.trim();
+    let text = (raw || '').trim();
+    // Strip markdown code fences if the LLM adds them despite instructions
     if (text.startsWith('```')) {
       const parts = text.split('```');
       text = (parts[1] || text).trim();
@@ -142,18 +157,33 @@ export class IntakeAssistant {
       const next_field = parsed?.next_field ?? null;
       const updatesRaw = parsed?.updates && typeof parsed.updates === 'object' ? parsed.updates : {};
 
-      // Filter updates to allowed keys only.
+      // Filter to allowed keys + sanitize values
       const updates: Record<string, any> = {};
       for (const k of Object.keys(updatesRaw)) {
-        if (INTAKE_FIELDS.includes(k as IntakeField)) updates[k] = updatesRaw[k];
+        if (INTAKE_FIELDS.includes(k as IntakeField) && updatesRaw[k] !== undefined && updatesRaw[k] !== null) {
+          updates[k] = sanitize(updatesRaw[k]);
+        }
       }
 
+      // Post-extraction: email format validation
+      const resolvedEmail = updates.user_email || userContext?.user_email;
+      const emailInvalid = resolvedEmail && !EMAIL_REGEX.test(resolvedEmail);
+
       const normalizedNextField: IntakeField | null = INTAKE_FIELDS.includes(next_field) ? (next_field as IntakeField) : null;
+
+      if (emailInvalid && next_field !== 'user_email') {
+        return {
+          updates,
+          next_field: 'user_email',
+          next_question: 'this email structure is not valid please type correct email ok',
+          ready_for_recommendations: false,
+        };
+      }
 
       return {
         updates,
         next_field: normalizedNextField,
-        next_question: next_question || 'Okay — what should I ask next?',
+        next_question: next_question || 'What should I ask next?',
         ready_for_recommendations,
       };
     } catch (e: any) {
