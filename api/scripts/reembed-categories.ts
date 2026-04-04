@@ -212,6 +212,13 @@ async function main() {
               embedding,
               embedding_text: embeddingText,
               contextual_prefix: contextualPrefix,
+              // Denormalize key filter fields so they're available on the embeddings
+              // row directly — used by the program_code index + future Pinecone migration
+              metadata: {
+                program_code: cat.stevie_programs?.program_code ?? null,
+                category_types: (cat.metadata?.category_types as string[] ?? []),
+                is_women_award: cat.stevie_programs?.program_code === 'WOMEN',
+              },
             });
 
           if (upsertError) throw new Error(upsertError.message);
