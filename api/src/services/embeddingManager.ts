@@ -239,114 +239,71 @@ Rules:
    */
   async detectCategoryTypes(context: UserContext): Promise<string[] | undefined> {
     const description = context.description || '';
-    const achievementImpact = context.achievement_impact || '';
-    const achievementInnovation = context.achievement_innovation || '';
-    
-    // If description is too short, fall back to keyword matching
-    if (description.length < 20) {
-      return this.detectCategoryTypesKeyword(context);
+
+    // Stage 1: keyword classifier — instant, no LLM, handles ~80% of cases correctly.
+    // Only fall through to LLM when keywords return nothing AND description is rich enough.
+    const keywordResult = this.detectCategoryTypesKeyword(context);
+    if (keywordResult && keywordResult.length > 0) {
+      logger.info('intent_detected_keyword', {
+        detected_types: keywordResult,
+        description_sample: description.substring(0, 80),
+      });
+      return keywordResult;
     }
-    
-    // Check if LLM-based intent detection is enabled (default: true for better accuracy)
-    const useLLMIntent = process.env.USE_LLM_INTENT_DETECTION !== 'false';
-    
-    if (!useLLMIntent) {
-      logger.info('llm_intent_detection_disabled', { note: 'Using keyword-based detection' });
-      return this.detectCategoryTypesKeyword(context);
+
+    // Stage 2: LLM fallback — only when description is long enough and keywords found nothing.
+    // Opt-out via USE_LLM_INTENT_DETECTION=false.
+    if (description.length < 30 || process.env.USE_LLM_INTENT_DETECTION === 'false') {
+      return undefined;
     }
-    
+
     try {
-      const prompt = `Analyze this achievement and identify the PRIMARY category types. Focus on the CORE ACHIEVEMENT, not the method/platform used.
+      const achievementImpact = context.achievement_impact || '';
+      const achievementInnovation = context.achievement_innovation || '';
 
-ACHIEVEMENT:
+      const prompt = `Classify this achievement into 1-2 award category types. Focus on WHAT was achieved, not the method.
+
 Description: ${description}
-Impact: ${achievementImpact}
-Innovation: ${achievementInnovation}
+${achievementImpact ? `Impact: ${achievementImpact}` : ''}
+${achievementInnovation ? `Innovation: ${achievementInnovation}` : ''}
 
-CATEGORY TYPES (select 1-2 PRIMARY types):
-- healthcare_medical: Medical, health, disease, surgery, vision, pharmaceutical, hospital, wellness
-- women_empowerment: Women helping women, female leadership, women's rights (NOT healthcare for women)
-- technology: Tech, software, AI, innovation, digital transformation, IT products/services
-- social_impact: CSR, community service, humanitarian, charity, non-profit, sustainability
-- business_general: Company growth, management, leadership, operations, finance
-- marketing_media: Advertising, PR, content creation, social media campaigns, communications
-- product_service: Product launches, service excellence, customer experience
+Types:
+- healthcare_medical: medical, health, disease, hospital, pharmaceutical, wellness
+- women_empowerment: women helping women, female leadership, gender equality
+- technology: software, AI, digital products, IT innovation
+- social_impact: CSR, community service, humanitarian, charity, sustainability
+- business_general: company growth, leadership, management, operations
+- marketing_media: advertising, PR, content campaigns, communications
+- product_service: product launch, service excellence, customer experience
 
-RULES:
-1. Focus on WHAT was achieved, not HOW it was communicated
-2. "Content creator who helped blind people" → healthcare_medical + social_impact (NOT marketing_media)
-3. "YouTube channel about cooking" → marketing_media
-4. "Company using social media for sales" → business_general (NOT marketing_media)
-5. Maximum 2 types - choose the most relevant
-
-Return ONLY a JSON array of 1-2 category types, e.g.: ["healthcare_medical", "social_impact"]`;
+Rules:
+1. "Content creator who helped blind people" → healthcare_medical + social_impact (NOT marketing_media)
+2. Max 2 types. Return ONLY a JSON array: ["type1", "type2"]`;
 
       const responseText = await openaiService.chatCompletion({
         messages: [{ role: 'user', content: prompt }],
         model: 'gpt-4o-mini',
-        temperature: 0.3,
-        maxTokens: 100,
+        temperature: 0.1,
+        maxTokens: 60,
       });
-      
-      // Try to parse as JSON array directly or extract from object
+
       let types: string[] = [];
-      try {
-        // Strip markdown code blocks if present (```json ... ```)
-        let cleanedResponse = (responseText || '').trim();
-        if (cleanedResponse.startsWith('```')) {
-          // Remove opening ```json or ``` and closing ```
-          cleanedResponse = cleanedResponse
-            .replace(/^```(?:json)?\s*\n?/, '')
-            .replace(/\n?```\s*$/, '')
-            .trim();
-        }
-        
-        const parsed = JSON.parse(cleanedResponse || '[]');
-        if (Array.isArray(parsed)) {
-          types = parsed;
-        } else if (parsed.types && Array.isArray(parsed.types)) {
-          types = parsed.types;
-        } else if (parsed.category_types && Array.isArray(parsed.category_types)) {
-          types = parsed.category_types;
-        }
-      } catch (parseError) {
-        logger.warn('intent_detection_parse_error', { response: responseText });
-      }
-      
+      let cleaned = (responseText || '').trim()
+        .replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '').trim();
+      const parsed = JSON.parse(cleaned || '[]');
+      if (Array.isArray(parsed)) types = parsed;
+
       if (types.length > 0) {
         logger.info('intent_detected_llm', {
           detected_types: types,
-          description_sample: description.substring(0, 100),
-          method: 'llm'
+          description_sample: description.substring(0, 80),
         });
-        
-        // Expand related types for better recall
-        // Healthcare often overlaps with social impact
-        if (types.includes('healthcare_medical') && !types.includes('social_impact')) {
-          // Check if description mentions helping people, community, etc.
-          const socialKeywords = ['helping', 'community', 'people', 'humanitarian', 'charity', 'volunteer'];
-          if (socialKeywords.some(kw => description.toLowerCase().includes(kw))) {
-            types.push('social_impact');
-            logger.info('intent_expanded', {
-              original: types.filter(t => t !== 'social_impact'),
-              expanded: types,
-              reason: 'Healthcare with social impact keywords'
-            });
-          }
-        }
-        
         return types;
       }
     } catch (error: any) {
-      logger.warn('intent_detection_failed', { error: error.message });
-      // Fall back to keyword matching
-      return this.detectCategoryTypesKeyword(context);
+      logger.warn('intent_detection_llm_failed', { error: error.message });
     }
-    
-    // No specific intent detected - search all categories
-    logger.info('no_specific_intent_detected', {
-      note: 'Searching across all category types',
-    });
+
     return undefined;
   }
 
