@@ -25,25 +25,6 @@ const FAST_PATH_FIELDS: ReadonlySet<IntakeField> = new Set<IntakeField>([
   'nomination_subject', 'org_type', 'gender_programs_opt_in', 'nomination_scope',
 ]);
 
-/** Ordered required fields — drives deterministic next-field advancement. */
-const REQUIRED_FIELD_ORDER: IntakeField[] = [
-  'user_name', 'user_email', 'user_location',
-  'nomination_subject', 'org_type', 'gender_programs_opt_in', 'nomination_scope',
-  'description',
-];
-
-/** Canned questions for each field (used when fast path handles the previous answer). */
-const FIELD_QUESTIONS: Partial<Record<IntakeField, string>> = {
-  user_name: "What's your name?",
-  user_email: 'And your email address?',
-  user_location: 'Where are you based? (city / country)',
-  business_location: 'Where is your business located?',
-  nomination_subject: 'Are we nominating an individual, a team, an organization, or a product?',
-  org_type: 'Is the organization for-profit, non-profit, government, education, or a startup?',
-  gender_programs_opt_in: 'Interested in women-focused awards too? (yes / no / skip)',
-  nomination_scope: 'Regional awards, international/global, or both?',
-  description: "Great! Now tell me about the achievement you'd like to nominate.",
-};
 
 /**
  * Try to normalize a raw user answer for a structured intake field.
@@ -101,19 +82,6 @@ function normalizeFieldValue(field: IntakeField, raw: string): { value: any; acc
   }
 }
 
-/**
- * Deterministically pick the next required field that hasn't been filled yet.
- * Returns null when all required fields are present (ready for recommendations).
- */
-function getNextRequiredField(userContext: any, askedFields: Set<string>): IntakeField | null {
-  for (const field of REQUIRED_FIELD_ORDER) {
-    const filled = field === 'gender_programs_opt_in'
-      ? userContext[field] !== undefined
-      : !!userContext[field];
-    if (!filled) return field;
-  }
-  return null;
-}
 
 export class UnifiedChatbotService {
   private supabase = getSupabaseClient();
@@ -376,93 +344,23 @@ export class UnifiedChatbotService {
       }
 
       // -----------------------------------------------------------------------
-      // Fast path: skip LLM for simple structured fields (saves ~70% of LLM
-      // calls during intake, ~400–800ms per turn).
-      // Conditions: pendingField is a fast-path field + message is short enough.
-      // Falls through to LLM path on normalization failure.
+      // Fast path: pre-normalize structured field answers so the LLM receives
+      // clean typed values and doesn't have to guess what the user meant.
+      // The LLM still generates every question naturally via planNext below.
       // -----------------------------------------------------------------------
       if (pendingField && FAST_PATH_FIELDS.has(pendingField) && message.length < 400) {
         const normalized = normalizeFieldValue(pendingField, message);
         if (normalized.accepted) {
           userContext = { ...userContext, [pendingField]: normalized.value };
           askedFields.add(pendingField);
-
-          logger.info('fast_path_applied', {
-            field: pendingField,
-            value_preview: String(normalized.value).substring(0, 40),
-          });
-
-          const nextField = getNextRequiredField(userContext, askedFields);
-          const assistantText = nextField
-            ? (FIELD_QUESTIONS[nextField] ?? `Please provide your ${nextField}.`)
-            : 'Perfect! Let me find the best categories for you.';
-
-          yield { type: 'chunk', content: assistantText };
-
-          const fullHistoryFP: Array<{ role: 'user' | 'assistant'; content: string }> = [
-            ...conversationHistory,
-            { role: 'user' as const, content: message },
-            { role: 'assistant' as const, content: assistantText },
-          ];
-          const updatedHistoryFP =
-            fullHistoryFP.length > this.MAX_CONVERSATION_HISTORY
-              ? fullHistoryFP.slice(-this.MAX_CONVERSATION_HISTORY)
-              : fullHistoryFP;
-
-          pendingField = nextField;
-          if (nextField) askedFields.add(nextField);
-
-          await this.sessionManager.updateSession(
-            sessionId,
-            {
-              user_context: userContext,
-              conversation_history: updatedHistoryFP,
-              pending_field: pendingField ?? null,
-              asked_fields: Array.from(askedFields),
-            },
-            session.conversation_state as any
-          );
-
-          this.persistChatMessagesFireAndForget({ sessionId, userMessage: message, assistantMessage: assistantText });
-
-          // If all required fields are filled, trigger recommendations
-          if (!nextField && this.hasMinimumForRecommendations(userContext)) {
-            yield { type: 'status', message: 'Generating personalized category recommendations...' };
-
-            const gender = (userContext as any).gender_programs_opt_in === false
-              ? 'opt_out'
-              : (userContext as any).gender_programs_opt_in === true
-                ? 'female'
-                : null;
-
-            const contextForRecommendations = {
-              ...userContext,
-              user_location: userContext.user_location || userContext.geography,
-              business_location: userContext.business_location || userContext.user_location || userContext.geography,
-              gender,
-              org_type: userContext.org_type || 'for_profit',
-              org_size: userContext.org_size || 'small',
-              achievement_focus: (userContext as any).achievement_focus || ['Innovation'],
-            };
-
-            const recommendations = await recommendationEngine.generateRecommendations(contextForRecommendations as any, {
-              limit: 15,
-              includeExplanations: true,
-            });
-
-            yield { type: 'recommendations', data: recommendations, count: recommendations.length };
-          }
-
-          logger.info('fast_path_complete', { next_field: nextField });
-          return;
+          pendingField = null; // already applied — skip applyAnswer below
+          logger.info('fast_path_pre_normalized', { field: (session.session_data as any).pending_field, value_preview: String(normalized.value).substring(0, 40) });
         }
-        // Normalization failed → fall through to LLM path
-        logger.info('fast_path_fallback_to_llm', { field: pendingField, message_preview: message.substring(0, 50) });
+        // On normalization failure, fall through to LLM extraction as normal
       }
 
-      // -----------------------------------------------------------------------
-      // LLM path: apply raw answer then let intakeAssistant plan next step.
-      // -----------------------------------------------------------------------
+      // LLM path: apply raw answer (skipped if fast path already applied it),
+      // then let intakeAssistant plan the next question naturally.
       if (pendingField) {
         const applied = applyAnswer({ pendingField, message, userContext });
         if (applied.accepted) {

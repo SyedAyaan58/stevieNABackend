@@ -7,19 +7,16 @@ import logger from '../utils/logger';
  * Generates match explanations for category recommendations using OpenAI.
  */
 
-const SYSTEM_PROMPT = `You are an expert at explaining why Stevie Award categories match a nomination.
+const SYSTEM_PROMPT = `You are a Stevie Awards expert who helps nominators understand exactly why a category is the right fit for their achievement.
 
-Your job is to analyze the user's nomination context and explain why each category is a good match.
+For each category, write 2-3 reasons that feel personally tailored — reference the actual achievement, not generic filler. Make them feel confident this is worth entering.
 
-For each category, provide 2-3 specific, concise reasons why it matches their nomination.
-
-Focus on:
-- Alignment with their achievement/description
-- Relevance to their organization type and size
-- Match with their focus areas
-- Fit with the category's purpose
-
-Keep reasons short (1 sentence each) and specific to their nomination.`;
+Rules:
+- Reference specific details from their achievement (what they did, who it helped, what changed)
+- Connect the category's PURPOSE to what they actually accomplished
+- One reason may highlight a competitive angle (e.g. "Few teams in your region have tackled this publicly")
+- Each reason: 1 sentence, direct, no hollow phrases like "aligns with" or "demonstrates commitment"
+- No markdown, no bullet formatting in the reasons themselves — just plain sentences`;
 
 export class ExplanationGenerator {
   /**
@@ -87,21 +84,16 @@ export class ExplanationGenerator {
     const parts: string[] = [];
 
     // User context
-    parts.push('User Nomination Context:');
-    if (userContext.nomination_subject) {
-      parts.push(`- Nominating: ${userContext.nomination_subject}`);
-    }
-    if (userContext.description) {
-      parts.push(`- Achievement: ${userContext.description.substring(0, 200)}`);
-    }
-    if (userContext.org_type) {
-      parts.push(`- Organization Type: ${userContext.org_type}`);
-    }
-    if (userContext.org_size) {
-      parts.push(`- Organization Size: ${userContext.org_size}`);
-    }
+    parts.push('Nomination context:');
+    if (userContext.user_name) parts.push(`- Nominator: ${userContext.user_name}`);
+    if (userContext.nomination_subject) parts.push(`- Nominating: ${userContext.nomination_subject}`);
+    if (userContext.description) parts.push(`- Achievement: ${userContext.description.substring(0, 500)}`);
+    if (userContext.achievement_impact) parts.push(`- Impact: ${userContext.achievement_impact.substring(0, 300)}`);
+    if (userContext.achievement_innovation) parts.push(`- Innovation: ${userContext.achievement_innovation.substring(0, 300)}`);
+    if (userContext.org_type) parts.push(`- Organization type: ${userContext.org_type}`);
+    if (userContext.user_location) parts.push(`- Location: ${userContext.user_location}`);
     if (userContext.achievement_focus && userContext.achievement_focus.length > 0) {
-      parts.push(`- Focus Areas: ${userContext.achievement_focus.join(', ')}`);
+      parts.push(`- Focus areas: ${userContext.achievement_focus.join(', ')}`);
     }
 
     parts.push('');
@@ -113,11 +105,11 @@ export class ExplanationGenerator {
       parts.push(`Category ID: ${category.category_id}`);
       parts.push(`Name: ${category.category_name}`);
       parts.push(`Program: ${category.program_name}`);
-      parts.push(`Description: ${category.description.substring(0, 150)}`);
+      parts.push(`Description: ${category.description.substring(0, 250)}`);
       parts.push('');
     }
 
-    parts.push('For each category, provide 2-3 specific reasons why it matches this nomination.');
+    parts.push('For each category, write 2-3 tailored reasons referencing the actual achievement above.');
     parts.push('');
     parts.push('Format your response as JSON:');
     parts.push('{');

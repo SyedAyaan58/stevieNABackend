@@ -152,11 +152,15 @@ export class RecommendationEngine {
 
       // Step 5: Intent boost on SimilarityResult (before dedup/map) — checks metadata.category_types (B2)
       if (detectedCategoryTypes && detectedCategoryTypes.length > 0) {
+        const womenIntent = detectedCategoryTypes.some(t => t === 'women_empowerment');
         filtered = filtered.map(result => {
           const catTypes: string[] = result.metadata?.category_types || [];
-          const matchesIntent = detectedCategoryTypes.some(t =>
+          const matchesCatType = detectedCategoryTypes.some(t =>
             catTypes.some(c => c.toLowerCase() === t.toLowerCase())
           );
+          // Also boost WOMEN program directly when women_empowerment intent is detected
+          const matchesWomenProgram = womenIntent && result.program_code === 'WOMEN';
+          const matchesIntent = matchesCatType || matchesWomenProgram;
           return {
             ...result,
             similarity_score: matchesIntent

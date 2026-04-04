@@ -456,7 +456,7 @@ Return ONLY a JSON array of 1-2 category types, e.g.: ["healthcare_medical", "so
           match_limit: limit,
           user_org_type: null,
           user_achievement_focus: userAchievementFocus || null,
-          user_gender: userGender || 'any',
+          user_gender: userGender ?? null, // null = no gender restriction (includes all categories)
         },
       );
 
