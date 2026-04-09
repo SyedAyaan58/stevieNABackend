@@ -251,32 +251,34 @@ export class RecommendationEngine {
  * Fix 5: Reciprocal Rank Fusion — merges multiple ranked result lists.
  * Categories that rank highly across multiple HyDE angles get boosted.
  * RRF_score(category) = Σ 1 / (k + rank_in_list_i), k=60
+ *
+ * IMPORTANT: RRF scores are used for ORDERING only. The original cosine
+ * similarity_score is preserved for display (confidence %). Raw RRF values
+ * are tiny (0.01–0.05) and would show as "4% confidence" on the frontend.
  */
 function reciprocalRankFusion(
   rankLists: Array<Array<{ category_id: string; similarity_score: number; [key: string]: any }>>,
   k: number = 60
 ): any[] {
-  const scores = new Map<string, number>();
-  const items = new Map<string, any>();
+  const rrfScores = new Map<string, number>();
+  const bestItems = new Map<string, any>();
 
   for (const list of rankLists) {
     list.forEach((item, rank) => {
-      const prev = scores.get(item.category_id) ?? 0;
-      scores.set(item.category_id, prev + 1 / (k + rank + 1));
-      // Keep the item with highest original score
-      if (!items.has(item.category_id) ||
-          item.similarity_score > (items.get(item.category_id)?.similarity_score ?? 0)) {
-        items.set(item.category_id, item);
+      const prev = rrfScores.get(item.category_id) ?? 0;
+      rrfScores.set(item.category_id, prev + 1 / (k + rank + 1));
+      // Keep the item with the highest ORIGINAL similarity score for display
+      if (!bestItems.has(item.category_id) ||
+          item.similarity_score > (bestItems.get(item.category_id)?.similarity_score ?? 0)) {
+        bestItems.set(item.category_id, item);
       }
     });
   }
 
-  return [...scores.entries()]
+  // Sort by RRF score (ordering), but return original similarity_score (display)
+  return [...rrfScores.entries()]
     .sort((a, b) => b[1] - a[1])
-    .map(([id, rrfScore]) => ({
-      ...items.get(id)!,
-      similarity_score: rrfScore,  // Replace with RRF score for downstream ranking
-    }));
+    .map(([id]) => bestItems.get(id)!);
 }
 
 export const recommendationEngine = new RecommendationEngine();
