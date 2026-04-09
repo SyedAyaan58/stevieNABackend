@@ -5,113 +5,96 @@
  * their business/organization location.
  *
  * Design:
- * - Eligibility is based on BUSINESS location, not personal location
+ * - LLM classifies user location into eligible regional programs
+ * - Handles fuzzy/informal locations ("EMEA", "South-East Asia", "the Gulf")
  * - Global programs (IBA, WOMEN, TECH, EMPLOYERS, SALES) are always included
- * - Static lookup: country/region → program codes (no LLM call, zero latency)
- * - Results are Redis-cached for 24h as a warm layer (survives restarts)
- * - On any failure, returns all Global programs (graceful degradation)
- *
- * Why static instead of LLM:
- * - 9 programs with fixed geographic scopes that never change
- * - LLM added 300–1000ms latency + cache miss risk on free-text location variants
- * - Static map is instant, deterministic, and has zero per-call cost
+ * - Results are Redis-cached for 24h (location → programs doesn't change)
+ * - On LLM failure, falls back to keyword matching, then Global-only
  */
 
 import crypto from 'crypto';
 import { cacheManager } from './cacheManager';
+import { openaiService } from './openaiService';
 import logger from '../utils/logger';
 
-const CACHE_TTL_SECONDS = 24 * 3600; // 24h — scopes never change
-const CACHE_KEY_VERSION = 'geo:v2:';  // v2 = static map (bump if map changes)
+const CACHE_TTL_SECONDS = 24 * 3600; // 24h
+const CACHE_KEY_VERSION = 'geo:v3:';  // v3 = LLM-driven
 
 const GLOBAL_PROGRAMS = ['IBA', 'WOMEN', 'TECH', 'EMPLOYERS', 'SALES'];
+const ALL_REGIONAL = ['ABA', 'APAC', 'MENA', 'GERMAN'];
+const ALL_PROGRAMS = [...GLOBAL_PROGRAMS, ...ALL_REGIONAL];
 
 // ---------------------------------------------------------------------------
-// Static country → regional program map
-// Covers all countries likely to appear as business locations.
-// Global programs are always appended — they never need to be in this map.
+// LLM classification
 // ---------------------------------------------------------------------------
 
-/** Regional programs keyed by normalized country/region string fragments. */
-const REGIONAL_MAP: Array<{ patterns: string[]; programs: string[] }> = [
-  // USA / Canada / Americas → ABA (American Business Awards accepts USA + international entries via IBA)
-  {
-    patterns: ['united states', 'usa', 'u s a', 'u s', 'america', 'canada', 'mexico',
-               'brazil', 'argentina', 'colombia', 'chile', 'peru', 'venezuela',
-               'puerto rico', 'caribbean'],
-    programs: ['ABA'],
-  },
+const GEO_SYSTEM_PROMPT = `You classify a business location into eligible Stevie Award programs.
 
-  // APAC — Asia & Pacific
-  {
-    patterns: [
-      'india', 'china', 'japan', 'south korea', 'korea', 'singapore', 'hong kong',
-      'taiwan', 'thailand', 'vietnam', 'indonesia', 'malaysia', 'philippines',
-      'bangladesh', 'sri lanka', 'pakistan', 'nepal', 'myanmar', 'cambodia',
-      'australia', 'new zealand', 'fiji', 'papua new guinea',
-      'asia', 'pacific', 'apac',
+Regional programs and their eligibility:
+- ABA: Organizations in the Americas (USA, Canada, Mexico, Central America, South America, Caribbean)
+- APAC: Organizations in Asia or the Pacific (India, China, Japan, Korea, Singapore, Australia, New Zealand, Southeast Asia, etc.)
+- MENA: Organizations in the Middle East or North Africa (UAE, Saudi Arabia, Egypt, Turkey, Israel, Qatar, etc.)
+- GERMAN: Organizations in German-speaking countries (Germany, Austria, Switzerland)
+
+Rules:
+- Return ONLY the regional program codes that match. Do NOT include Global programs.
+- A location can match multiple regional programs (rare but possible for border regions).
+- If the location is ambiguous or you cannot determine the region, return an empty array.
+- "EMEA" = MENA + GERMAN (Europe has no dedicated program, but MENA and GERMAN are subsets)
+- "Global", "worldwide", "international" with no specific country = return empty array (Global programs handle it)
+
+Return JSON only: {"programs": ["ABA"]} or {"programs": []} or {"programs": ["APAC", "MENA"]}`;
+
+async function classifyWithLLM(location: string): Promise<string[]> {
+  const response = await openaiService.chatCompletion({
+    messages: [
+      { role: 'system', content: GEO_SYSTEM_PROMPT },
+      { role: 'user', content: `Business location: "${location}"` },
     ],
-    programs: ['APAC'],
-  },
+    model: 'gpt-4o-mini',
+    temperature: 0,
+    maxTokens: 50,
+  });
 
-  // MENA — Middle East & North Africa
-  {
-    patterns: [
-      'saudi arabia', 'ksa', 'uae', 'united arab emirates', 'dubai', 'abu dhabi',
-      'qatar', 'kuwait', 'bahrain', 'oman', 'jordan', 'lebanon', 'iraq', 'iran',
-      'israel', 'turkey', 'egypt', 'morocco', 'algeria', 'tunisia', 'libya',
-      'sudan', 'middle east', 'north africa', 'mena',
-    ],
-    programs: ['MENA'],
-  },
+  const parsed = JSON.parse(response);
+  const programs: string[] = parsed.programs || [];
 
-  // GERMAN — Germany, Austria, Switzerland (DACH)
-  {
-    patterns: ['germany', 'deutschland', 'austria', 'österreich', 'switzerland', 'schweiz', 'dach'],
-    programs: ['GERMAN'],
-  },
-
-  // Rest of Europe → no regional Stevie program (only Global programs apply)
-  // Intentionally not listed — they get Global only, which is correct.
-];
-
-// ---------------------------------------------------------------------------
-// Normalise location string for consistent matching
-// ---------------------------------------------------------------------------
-
-function normalise(s: string): string {
-  return (s || '').toLowerCase().trim()
-    .replace(/[.,\/#!$%\^&\*;:{}=_`~()]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  // Validate — only allow known regional codes
+  return programs.filter(p => ALL_REGIONAL.includes(p));
 }
 
-/**
- * Map a business location string to eligible Stevie program codes.
- * Always includes all Global programs.
- * Pure function — no I/O, instant.
- */
-function resolvePrograms(bizLocation: string): string[] {
-  const loc = normalise(bizLocation);
-  if (!loc) return [...GLOBAL_PROGRAMS];
+// ---------------------------------------------------------------------------
+// Keyword fallback (no LLM, instant — used when LLM fails)
+// ---------------------------------------------------------------------------
+
+const KEYWORD_MAP: Array<{ keywords: string[]; programs: string[] }> = [
+  { keywords: ['united states', 'usa', 'america', 'canada', 'mexico', 'brazil', 'argentina', 'colombia', 'chile', 'peru', 'caribbean'], programs: ['ABA'] },
+  { keywords: ['india', 'china', 'japan', 'korea', 'singapore', 'hong kong', 'taiwan', 'thailand', 'vietnam', 'indonesia', 'malaysia', 'philippines', 'australia', 'new zealand', 'asia', 'pacific', 'apac'], programs: ['APAC'] },
+  { keywords: ['saudi', 'uae', 'emirates', 'dubai', 'qatar', 'kuwait', 'bahrain', 'oman', 'jordan', 'lebanon', 'egypt', 'morocco', 'algeria', 'tunisia', 'turkey', 'middle east', 'north africa', 'mena'], programs: ['MENA'] },
+  { keywords: ['germany', 'deutschland', 'austria', 'switzerland', 'schweiz', 'dach'], programs: ['GERMAN'] },
+];
+
+function keywordFallback(location: string): string[] {
+  const loc = location.toLowerCase().replace(/[.,\/#!$%^&*;:{}=_`~()]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!loc) return [];
 
   const regional: string[] = [];
-
-  for (const entry of REGIONAL_MAP) {
-    const matched = entry.patterns.some(p => loc.includes(p));
-    if (matched) {
+  for (const entry of KEYWORD_MAP) {
+    if (entry.keywords.some(kw => loc.includes(kw))) {
       for (const prog of entry.programs) {
         if (!regional.includes(prog)) regional.push(prog);
       }
     }
   }
-
-  // Always include Global programs — deduplicate
-  return [...new Set([...GLOBAL_PROGRAMS, ...regional])];
+  return regional;
 }
 
+// ---------------------------------------------------------------------------
+// Cache key
+// ---------------------------------------------------------------------------
+
 function buildCacheKey(bizLocation: string): string {
-  const raw = `${CACHE_KEY_VERSION}${normalise(bizLocation)}`;
+  const raw = `${CACHE_KEY_VERSION}${bizLocation.toLowerCase().trim()}`;
   return crypto.createHash('sha256').update(raw).digest('hex');
 }
 
@@ -121,15 +104,13 @@ function buildCacheKey(bizLocation: string): string {
 
 export class GeographyEligibilityService {
   /**
-   * Returns the list of Stevie program codes the user is eligible for.
-   * Uses static lookup (instant, no LLM) with Redis warm cache (24h TTL).
-   * Falls back to Global-only programs on any error.
+   * Returns eligible Stevie program codes for a user's location.
+   * LLM-classified, Redis-cached, keyword fallback on failure.
    */
   async getEligiblePrograms(
     userLocation: string,
     businessLocation: string
   ): Promise<string[]> {
-    // Eligibility is based on BUSINESS location
     const bizLoc = (businessLocation || userLocation || '').trim();
 
     if (!bizLoc) {
@@ -139,7 +120,7 @@ export class GeographyEligibilityService {
 
     const cacheKey = buildCacheKey(bizLoc);
 
-    // Check Redis cache (warm layer — avoids repeated log noise, not needed for correctness)
+    // Check Redis cache
     try {
       const cached = await cacheManager.get<string[]>(`geo:${cacheKey}`);
       if (cached) {
@@ -150,32 +131,36 @@ export class GeographyEligibilityService {
       logger.warn('geo_eligibility_cache_read_error', { error: cacheErr.message });
     }
 
-    // Static lookup — instant, no LLM
+    // LLM classification
+    let regional: string[] = [];
+    let method = 'llm';
+
     try {
-      const programs = resolvePrograms(bizLoc);
-
-      logger.info('geo_eligibility_resolved', {
-        user_location: userLocation,
-        biz_location: bizLoc,
-        programs,
-        method: 'static_map',
-      });
-
-      // Cache result
-      try {
-        await cacheManager.set(`geo:${cacheKey}`, programs, CACHE_TTL_SECONDS);
-      } catch (cacheErr: any) {
-        logger.warn('geo_eligibility_cache_write_error', { error: cacheErr.message });
-      }
-
-      return programs;
-    } catch (error: any) {
-      logger.warn('geo_eligibility_static_map_failed', {
-        biz_location: bizLoc,
-        error: error.message,
-      });
-      return [...GLOBAL_PROGRAMS];
+      regional = await classifyWithLLM(bizLoc);
+    } catch (llmErr: any) {
+      logger.warn('geo_eligibility_llm_failed', { error: llmErr.message, biz_location: bizLoc });
+      // Fallback to keyword matching
+      regional = keywordFallback(bizLoc);
+      method = 'keyword_fallback';
     }
+
+    const programs = [...new Set([...GLOBAL_PROGRAMS, ...regional])];
+
+    logger.info('geo_eligibility_resolved', {
+      biz_location: bizLoc,
+      regional,
+      programs,
+      method,
+    });
+
+    // Cache result
+    try {
+      await cacheManager.set(`geo:${cacheKey}`, programs, CACHE_TTL_SECONDS);
+    } catch (cacheErr: any) {
+      logger.warn('geo_eligibility_cache_write_error', { error: cacheErr.message });
+    }
+
+    return programs;
   }
 }
 
