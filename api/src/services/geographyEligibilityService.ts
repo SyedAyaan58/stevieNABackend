@@ -36,7 +36,7 @@ const GLOBAL_PROGRAMS = ['IBA', 'WOMEN', 'TECH', 'EMPLOYERS', 'SALES'];
 const REGIONAL_MAP: Array<{ patterns: string[]; programs: string[] }> = [
   // USA / Canada / Americas → ABA (American Business Awards accepts USA + international entries via IBA)
   {
-    patterns: ['united states', 'usa', 'u.s.a', 'u.s.', 'america', 'canada', 'mexico',
+    patterns: ['united states', 'usa', 'u s a', 'u s', 'america', 'canada', 'mexico',
                'brazil', 'argentina', 'colombia', 'chile', 'peru', 'venezuela',
                'puerto rico', 'caribbean'],
     programs: ['ABA'],

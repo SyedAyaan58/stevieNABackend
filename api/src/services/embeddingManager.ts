@@ -392,8 +392,8 @@ Rules:
     const detectedTypes: Set<string> = new Set();
     
     // Healthcare/Medical keywords (HIGH PRIORITY)
-    const healthcareKeywords = ['health', 'medical', 'hospital', 'doctor', 'nurse', 'patient', 'surgery', 'treatment', 'disease', 'wellness', 'pharmaceutical', 'clinic', 'healthcare', 'vision', 'sight', 'blind', 'cataract', 'therapy', 'cure', 'diagnosis'];
-    const hasHealthcare = healthcareKeywords.some(kw => allText.includes(kw));
+    const healthcareKeywords = ['health', 'medical', 'hospital', 'doctor', 'nurse', 'patient', 'surgery', 'treatment', 'disease', 'wellness', 'pharmaceutical', 'clinic', 'healthcare', 'blind', 'cataract', 'therapy', 'cure', 'diagnosis'];
+    const hasHealthcare = healthcareKeywords.some(kw => new RegExp(`\\b${kw}\\b`).test(allText));
     if (hasHealthcare) {
       detectedTypes.add('healthcare_medical');
     }
@@ -480,7 +480,11 @@ Rules:
 
     try {
       // Fix 3: Enable iterative_scan to prevent silent result drops under filtered HNSW
-      await this.client.rpc("set_hnsw_iterative_scan").throwOnError();
+      try {
+        await this.client.rpc("set_hnsw_iterative_scan").throwOnError();
+      } catch (err: any) {
+        logger.warn("hnsw_iterative_scan_unavailable", { error: err.message });
+      }
 
       const { data, error } = await this.client.rpc(
         "search_similar_categories",

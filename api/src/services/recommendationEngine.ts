@@ -128,37 +128,47 @@ export class RecommendationEngine {
         merged_count: similarityResults.length,
       });
 
-      // Step 3: Rerank using Pinecone cross-encoder with HyDE-expanded query (B3)
-      let rerankedResults = similarityResults;
-      if (similarityResults.length > 1 && expandedQuery) {
-        try {
-          const rerankDocs = similarityResults.map(r => `${r.contextual_prefix || ''} ${r.category_name}. ${r.description}`);
-          const rerankIndices = await pineconeClient.rerank(expandedQuery, rerankDocs, limit);
-          rerankedResults = rerankIndices.map(i => similarityResults[i]);
-          logger.info('rerank_complete', {
-            input_count: similarityResults.length,
-            output_count: rerankedResults.length,
-          });
-        } catch (rerankError: any) {
-          logger.warn('rerank_failed_using_vector_order', { error: rerankError.message });
-          rerankedResults = similarityResults.slice(0, limit);
-        }
-      } else {
-        rerankedResults = similarityResults.slice(0, limit);
-      }
-
-      // Step 4: Min similarity threshold
+      // Step 3: Min similarity threshold — applied BEFORE reranking on raw cosine scores
+      // This ensures the reranker only sees candidates above the quality floor.
       const minScore = parseFloat(process.env.MIN_SIMILARITY_SCORE || '0.35');
-      let filtered = rerankedResults;
+      let qualityCandidates = similarityResults;
       if (minScore > 0) {
-        filtered = rerankedResults.filter(r => r.similarity_score >= minScore);
-        if (filtered.length < rerankedResults.length) {
+        qualityCandidates = similarityResults.filter(r => r.similarity_score >= minScore);
+        if (qualityCandidates.length < similarityResults.length) {
           logger.info('low_similarity_filtered', {
-            before: rerankedResults.length,
-            after: filtered.length,
+            before: similarityResults.length,
+            after: qualityCandidates.length,
             min_score: minScore,
           });
         }
+      }
+
+      // Step 4: Rerank using Pinecone cross-encoder with HyDE-expanded query (B3)
+      let filtered = qualityCandidates;
+      if (qualityCandidates.length > 1 && expandedQuery) {
+        try {
+          const rerankDocs = qualityCandidates.map(r => `${r.contextual_prefix || ''} ${r.category_name}. ${r.description}`);
+          const rerankIndices = await pineconeClient.rerank(expandedQuery, rerankDocs, limit);
+          const reranked = rerankIndices.map(i => qualityCandidates[i]);
+          // Pad with non-reranked remainder if reranker returned fewer than limit
+          if (reranked.length < limit) {
+            const rerankedSet = new Set(rerankIndices);
+            const remainder = qualityCandidates
+              .filter((_, i) => !rerankedSet.has(i))
+              .slice(0, limit - reranked.length);
+            reranked.push(...remainder);
+          }
+          filtered = reranked;
+          logger.info('rerank_complete', {
+            input_count: qualityCandidates.length,
+            output_count: filtered.length,
+          });
+        } catch (rerankError: any) {
+          logger.warn('rerank_failed_using_vector_order', { error: rerankError.message });
+          filtered = qualityCandidates.slice(0, limit);
+        }
+      } else {
+        filtered = qualityCandidates.slice(0, limit);
       }
 
       // Step 5: Intent boost on SimilarityResult (before dedup/map) — checks metadata.category_types (B2)
