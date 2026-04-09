@@ -79,13 +79,13 @@ export class RecommendationEngine {
         throw new Error('UserContext is incomplete. Cannot generate recommendations.');
       }
 
-      // Step 1: Run embedding (HyDE) + intent detection + geo eligibility in parallel (B7)
+      // Step 1: Run Multi-HyDE + intent detection + geo eligibility in parallel (B7 + Fix 5)
       const userLocation = context.user_location || context.geography || '';
       const bizLocation = context.business_location || userLocation;
 
-      const [{ embedding: userEmbedding, expandedQuery }, detectedCategoryTypesResult, eligibleProgramCodes] =
+      const [multiHydeResult, detectedCategoryTypesResult, eligibleProgramCodes] =
         await Promise.all([
-          this.embeddingMgr.generateUserEmbedding(context),
+          this.embeddingMgr.generateMultiHyDE(context),
           this.embeddingMgr.detectCategoryTypes(context).catch((err: any) => {
             logger.warn('intent_detection_error_skipping', { error: err.message });
             return undefined;
@@ -96,31 +96,43 @@ export class RecommendationEngine {
           }),
         ]);
 
+      const { embeddings: hydeEmbeddings, expandedQuery } = multiHydeResult;
       const detectedCategoryTypes = detectedCategoryTypesResult;
 
       logger.info('parallel_step_complete', {
-        embedding_dim: userEmbedding.length,
+        hyde_count: hydeEmbeddings.length,
         intent_types: detectedCategoryTypes || 'none',
         eligible_programs: eligibleProgramCodes || 'all',
       });
 
-      // Step 2: Vector search — retrieve 2x limit for reranker candidates
-      const retrievalLimit = Math.min(limit * 2, 20);
-      const similarityResults = await this.embeddingMgr.performSimilaritySearch(
-        userEmbedding,
-        eligibleProgramCodes || undefined,
-        retrievalLimit,
-        context.achievement_focus,
-        context.gender
+      // Step 2: Fix 5 — Multi-HyDE vector search + RRF merge
+      // Run parallel searches (one per HyDE angle), merge with Reciprocal Rank Fusion
+      const searchLimit = 50; // per-query limit; RRF merges and deduplicates
+      const searchResults = await Promise.all(
+        hydeEmbeddings.map(emb =>
+          this.embeddingMgr.performSimilaritySearch(
+            emb,
+            eligibleProgramCodes || undefined,
+            searchLimit,
+            context.achievement_focus,
+            context.gender
+          )
+        )
       );
 
-      logger.info('similarity_search_complete', { results_count: similarityResults.length });
+      // RRF merge: categories ranked highly across multiple angles score higher
+      const similarityResults = reciprocalRankFusion(searchResults).slice(0, Math.min(limit * 10, 150));
+
+      logger.info('similarity_search_complete', {
+        per_query_counts: searchResults.map(r => r.length),
+        merged_count: similarityResults.length,
+      });
 
       // Step 3: Rerank using Pinecone cross-encoder with HyDE-expanded query (B3)
       let rerankedResults = similarityResults;
       if (similarityResults.length > 1 && expandedQuery) {
         try {
-          const rerankDocs = similarityResults.map(r => `${r.category_name}. ${r.description}`);
+          const rerankDocs = similarityResults.map(r => `${r.contextual_prefix || ''} ${r.category_name}. ${r.description}`);
           const rerankIndices = await pineconeClient.rerank(expandedQuery, rerankDocs, limit);
           rerankedResults = rerankIndices.map(i => similarityResults[i]);
           logger.info('rerank_complete', {
@@ -233,6 +245,38 @@ export class RecommendationEngine {
       throw error;
     }
   }
+}
+
+/**
+ * Fix 5: Reciprocal Rank Fusion — merges multiple ranked result lists.
+ * Categories that rank highly across multiple HyDE angles get boosted.
+ * RRF_score(category) = Σ 1 / (k + rank_in_list_i), k=60
+ */
+function reciprocalRankFusion(
+  rankLists: Array<Array<{ category_id: string; similarity_score: number; [key: string]: any }>>,
+  k: number = 60
+): any[] {
+  const scores = new Map<string, number>();
+  const items = new Map<string, any>();
+
+  for (const list of rankLists) {
+    list.forEach((item, rank) => {
+      const prev = scores.get(item.category_id) ?? 0;
+      scores.set(item.category_id, prev + 1 / (k + rank + 1));
+      // Keep the item with highest original score
+      if (!items.has(item.category_id) ||
+          item.similarity_score > (items.get(item.category_id)?.similarity_score ?? 0)) {
+        items.set(item.category_id, item);
+      }
+    });
+  }
+
+  return [...scores.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([id, rrfScore]) => ({
+      ...items.get(id)!,
+      similarity_score: rrfScore,  // Replace with RRF score for downstream ranking
+    }));
 }
 
 export const recommendationEngine = new RecommendationEngine();

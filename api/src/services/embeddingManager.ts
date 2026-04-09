@@ -33,6 +33,7 @@ interface SimilarityResult {
   similarity_score: number;
   category_name: string;
   description: string;
+  contextual_prefix?: string;    // Fix 2: returned by SQL for reranker
   program_name: string;
   program_code: string;
   geographic_scope: string[];
@@ -233,6 +234,77 @@ Rules:
   }
 
   /**
+   * Fix 5: Multi-HyDE — Generate 3 angle-specific queries, pipelined for low latency.
+   *
+   *   A (balanced):    LLM HyDE — full context (existing prompt)
+   *   B (achievement): LLM HyDE — what was built/created/innovated
+   *   C (template):    FREE — structured template, no LLM call
+   *
+   * Pipelining: Each LLM result is embedded AS SOON as it resolves (not waiting for all 3).
+   * Template embedding starts immediately (no LLM dependency).
+   *
+   * Net latency: ~max(LLM_A, LLM_B) + ~max(embed) ≈ 400-500ms total
+   * (vs serial: LLM + embed + LLM + embed + LLM + embed ≈ 1500ms)
+   */
+  async generateMultiHyDE(context: UserContext): Promise<{
+    embeddings: number[][];
+    expandedQuery: string;
+  }> {
+    const template = this.formatUserQueryText(context);
+    const disabled = process.env.DISABLE_RICH_EXPANSION === "true";
+
+    const achievementPrompt = `You are expanding a nomination context for award category matching. Focus ONLY on the ACHIEVEMENT angle.
+Describe: what was built, created, launched, or innovated. What specific deliverable was completed? What technical or creative approach made it stand out?
+Do NOT mention impact or results. Focus purely on the work itself.
+Output a single paragraph (3-4 sentences). No markdown.
+
+Context:\n${template}`;
+
+    try {
+      // Pipeline: start template embedding immediately (free — no LLM wait)
+      const templateEmbPromise = this.generateEmbedding(template);
+
+      // Pipeline: start both LLM calls, embed each as soon as it resolves
+      const balancedEmbPromise = (async () => {
+        const query = disabled ? template : await this.generateRichSearchQuery(context);
+        return { query, embedding: await this.generateEmbedding(query) };
+      })();
+
+      const achievementEmbPromise = (async () => {
+        const query = await openaiService.chatCompletion({
+          messages: [{ role: "user", content: achievementPrompt }],
+          model: "gpt-4o-mini",
+          maxTokens: 200,
+          temperature: 0.3,
+        }).then(r => (r || "").trim()).catch(() => template);
+        return this.generateEmbedding(query.length > 50 ? query : template);
+      })();
+
+      // Await all 3 — they've been running concurrently the whole time
+      const [templateEmb, balanced, achievementEmb] = await Promise.all([
+        templateEmbPromise,
+        balancedEmbPromise,
+        achievementEmbPromise,
+      ]);
+
+      logger.info("multi_hyde_generated", {
+        balanced_len: balanced.query.length,
+        angles: 3,
+      });
+
+      return {
+        embeddings: [balanced.embedding, achievementEmb, templateEmb],
+        expandedQuery: balanced.query,
+      };
+    } catch (error: any) {
+      logger.warn("multi_hyde_failed_falling_back", { error: error.message });
+      const query = disabled ? template : await this.generateRichSearchQuery(context);
+      const embedding = await this.generateEmbedding(query);
+      return { embeddings: [embedding], expandedQuery: query };
+    }
+  }
+
+  /**
    * Detect category types (intent) from user context using OpenAI.
    * Analyzes the full context to determine PRIMARY intent, not just keywords.
    * Returns array of category types to filter by, or undefined for no filtering.
@@ -407,6 +479,9 @@ Rules:
     });
 
     try {
+      // Fix 3: Enable iterative_scan to prevent silent result drops under filtered HNSW
+      await this.client.rpc("set_hnsw_iterative_scan").throwOnError();
+
       const { data, error } = await this.client.rpc(
         "search_similar_categories",
         {

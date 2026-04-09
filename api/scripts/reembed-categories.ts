@@ -126,10 +126,10 @@ const GLOBAL_PROGRAMS = new Set(['IBA', 'WOMEN', 'TECH', 'EMPLOYERS', 'SALES']);
 function getGeoScope(programCode?: string): string[] {
   if (!programCode) return ['Global'];
   if (GLOBAL_PROGRAMS.has(programCode)) return ['Global'];
-  if (programCode === 'ABA') return ['USA'];
+  if (programCode === 'ABA') return ['America'];
   if (programCode === 'MENA') return ['Middle East', 'North Africa'];
   if (programCode === 'APAC') return ['Asia', 'Pacific'];
-  if (programCode === 'GERMAN') return ['Germany', 'Austria', 'Switzerland'];
+  if (programCode === 'GERMAN') return ['Germany'];
   return ['Global'];
 }
 
@@ -224,16 +224,20 @@ async function main() {
               embedding,
               embedding_text: embeddingText,
               contextual_prefix: contextualPrefix,
-              // Denormalize key filter fields so they're available on the embeddings row.
-              // Global programs are open worldwide — always get ['Global'] scope.
+              // Denormalize ALL filter + display fields for zero-join retrieval.
               metadata: {
                 program_code:            cat.stevie_programs?.program_code ?? null,
+                category_code:           cat.metadata?.category_code ?? null,
                 is_women_award:          cat.stevie_programs?.program_code === 'WOMEN',
+                group_name:              cat.metadata?.group_name ?? null,
+                group_description:       cat.metadata?.group_description ?? null,
+                entry_format:            cat.metadata?.entry_format ?? null,
                 category_types:          (cat.metadata?.category_types as string[] ?? []),
                 geographic_scope:        getGeoScope(cat.stevie_programs?.program_code),
-                applicable_org_types:    (cat.applicable_org_types as string[] ?? []),
-                applicable_org_sizes:    (cat.applicable_org_sizes as string[] ?? []),
-                nomination_subject_type: cat.nomination_subject_type ?? null,
+                applicable_org_types:    (cat.metadata?.applicable_org_types as string[] ?? cat.applicable_org_types as string[] ?? []),
+                applicable_org_sizes:    (cat.metadata?.applicable_org_sizes as string[] ?? cat.applicable_org_sizes as string[] ?? []),
+                nomination_subject_type: cat.metadata?.nomination_subject_type ?? cat.nomination_subject_type ?? null,
+                achievement_focus:       (cat.metadata?.achievement_focus as string[] ?? []),
               },
             });
 
