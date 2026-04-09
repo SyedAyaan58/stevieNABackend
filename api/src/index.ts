@@ -48,6 +48,7 @@ import { correlationIdMiddleware } from "./middleware/correlationId";
 import { requestLoggerMiddleware } from "./middleware/requestLogger";
 import { errorHandlerMiddleware } from "./middleware/errorHandler";
 import { globalRateLimiter } from "./middleware/rateLimiter";
+import { cacheManager } from "./services/cacheManager";
 import { sanitizeInput } from "./middleware/validation";
 import healthRouter from "./routes/health";
 import metricsRouter from "./routes/metrics";
@@ -190,8 +191,16 @@ const server = app.listen(PORT, () => {
 const gracefulShutdown = (signal: string) => {
   logger.info(`${signal} received. Starting graceful shutdown...`);
 
-  server.close(() => {
+  server.close(async () => {
     logger.info("HTTP server closed");
+
+    // Close Redis connection gracefully
+    try {
+      await cacheManager.close();
+      logger.info("Redis connection closed");
+    } catch (err: any) {
+      logger.error("Redis close error", { error: err.message });
+    }
 
     // Close Supabase connection
     closeSupabaseConnection();

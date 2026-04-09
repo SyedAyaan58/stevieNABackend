@@ -70,7 +70,7 @@ router.post('/upload', validateJWT, upload.single('file'), async (req, res) => {
     logger.error('document_upload_route_error', { error: error.message });
     return res.status(500).json({
       error: 'Failed to upload document',
-      details: error.message,
+      ...(process.env.NODE_ENV !== 'production' && { details: error.message }),
     });
   }
 });
@@ -106,7 +106,7 @@ router.post('/ingest', validateJWT, async (req, res) => {
     logger.error('document_ingest_route_error', { error: error.message });
     return res.status(500).json({
       error: 'Failed to ingest document',
-      details: error.message,
+      ...(process.env.NODE_ENV !== 'production' && { details: error.message }),
     });
   }
 });
@@ -129,7 +129,7 @@ router.delete('/:id', validateJWT, async (req, res) => {
     logger.error('document_delete_route_error', { error: error.message });
     return res.status(500).json({
       error: 'Failed to delete document',
-      details: error.message,
+      ...(process.env.NODE_ENV !== 'production' && { details: error.message }),
     });
   }
 });
@@ -164,7 +164,7 @@ router.post('/search', async (req, res) => {
     logger.error('document_search_route_error', { error: error.message });
     return res.status(500).json({
       error: 'Failed to search documents',
-      details: error.message,
+      ...(process.env.NODE_ENV !== 'production' && { details: error.message }),
     });
   }
 });
@@ -193,7 +193,7 @@ router.get('/:id', async (req, res) => {
     logger.error('document_get_route_error', { error: error.message });
     return res.status(500).json({
       error: 'Failed to get document',
-      details: error.message,
+      ...(process.env.NODE_ENV !== 'production' && { details: error.message }),
     });
   }
 });
@@ -206,10 +206,11 @@ router.get('/', async (req, res) => {
   try {
     const { program, category, limit, offset } = req.query;
 
+    const parsedLimit = limit ? parseInt(limit as string, 10) : 100;
     const documents = await documentManager.listDocuments({
       program: program as string,
       category: category as string,
-      limit: limit ? parseInt(limit as string, 10) : undefined,
+      limit: Math.min(parsedLimit, 500),
       offset: offset ? parseInt(offset as string, 10) : undefined,
     });
 
@@ -222,7 +223,7 @@ router.get('/', async (req, res) => {
     logger.error('document_list_route_error', { error: error.message });
     res.status(500).json({
       error: 'Failed to list documents',
-      details: error.message,
+      ...(process.env.NODE_ENV !== 'production' && { details: error.message }),
     });
   }
 });
@@ -252,7 +253,7 @@ router.get('/:id/download', async (req, res) => {
     logger.error('document_download_route_error', { error: error.message });
     return res.status(500).json({
       error: 'Failed to generate download URL',
-      details: error.message,
+      ...(process.env.NODE_ENV !== 'production' && { details: error.message }),
     });
   }
 });

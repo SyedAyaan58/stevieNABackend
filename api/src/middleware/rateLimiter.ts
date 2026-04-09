@@ -16,21 +16,21 @@ export function createRateLimiter(options: {
   keyGenerator?: (req: Request) => string;
 }) {
   const {
+    windowMs,
     max,
     message = 'Too many requests, please try again later.',
     keyGenerator = (req: Request) => req.ip || 'unknown',
   } = options;
-  
-  // Note: windowMs is accepted for API compatibility but not currently used
-  // The cacheManager uses a fixed RATE_LIMIT_WINDOW constant
+
+  const windowSec = Math.ceil(windowMs / 1000);
 
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const key = keyGenerator(req);
       const route = req.path;
 
-      // Check rate limit using Redis
-      const result = await cacheManager.checkRateLimit(key, route, max);
+      // Check rate limit using Redis — pass actual window
+      const result = await cacheManager.checkRateLimit(key, route, max, windowSec);
 
       // Set rate limit headers
       res.setHeader('X-RateLimit-Limit', max.toString());
@@ -64,15 +64,8 @@ export function createRateLimiter(options: {
   };
 }
 
-/**
- * Chat-specific rate limiter for the unified /api/chat endpoint.
-
- */
-export const chatRateLimiter = createRateLimiter({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 60,
-  message: 'Too many chat requests. Please slow down and try again shortly.',
-});
+// Chat rate limiting is handled by chatRateLimitRedis (middleware/chatRateLimit.ts)
+// which correctly keys by userId and uses its own TTL. Do not add a second limiter here.
 
 /**
  * Global rate limiter for all API endpoints.

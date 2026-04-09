@@ -470,7 +470,7 @@ export class UnifiedChatbotService {
       const updatedHistory =
         fullHistory.length > this.MAX_CONVERSATION_HISTORY ? fullHistory.slice(-this.MAX_CONVERSATION_HISTORY) : fullHistory;
 
-      pendingField = plan.ready_for_recommendations ? null : effectiveNextField;
+      pendingField = (plan.ready_for_recommendations || forceReady) ? null : effectiveNextField;
 
       // Track that we've asked this field
       if (effectiveNextField) {

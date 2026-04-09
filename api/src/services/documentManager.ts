@@ -38,26 +38,11 @@ export class DocumentManager {
       // Step 1: Create document record in PostgreSQL
       const documentMetadata: Record<string, any> = metadata || {};
 
-      // If file provided, upload to S3 first
+      // Store file metadata (S3 upload happens AFTER DB insert so we have the real document ID)
       if (file) {
-        try {
-          const s3Key = await s3Service.uploadDocument(
-            '', // Will use document ID after creation
-            file.buffer,
-            file.contentType,
-            file.originalFilename
-          );
-
-          documentMetadata.s3_key = s3Key;
-          documentMetadata.original_filename = file.originalFilename;
-          documentMetadata.file_size = file.buffer.length;
-          documentMetadata.content_type_file = file.contentType;
-
-          logger.info('document_uploaded_to_s3', { s3_key: s3Key });
-        } catch (s3Error: any) {
-          logger.error('s3_upload_failed_continuing', { error: s3Error.message });
-          // Continue without S3 - not critical for ingestion
-        }
+        documentMetadata.original_filename = file.originalFilename;
+        documentMetadata.file_size = file.buffer.length;
+        documentMetadata.content_type_file = file.contentType;
       }
 
       const { data: document, error: dbError } = await this.supabase
@@ -78,35 +63,30 @@ export class DocumentManager {
 
       logger.info('document_created_in_db', { documentId: document.id });
 
-      // Step 2: If S3 upload happened with temp ID, update with real document ID
-      if (file && documentMetadata.s3_key) {
+      // Upload to S3 with real document ID (no orphaned temp files)
+      if (file) {
         try {
-          const ext = file.originalFilename.split('.').pop() || 'bin';
-          const newS3Key = `kb_articles/${document.id}.${ext}`;
-
-          // Re-upload with correct document ID
-          await s3Service.uploadDocument(
+          const s3Key = await s3Service.uploadDocument(
             document.id,
             file.buffer,
             file.contentType,
             file.originalFilename
           );
 
-          // Update metadata with correct S3 key
           await this.supabase
             .from('documents')
             .update({
               metadata: {
                 ...documentMetadata,
-                s3_key: newS3Key,
+                s3_key: s3Key,
               },
             })
             .eq('id', document.id);
 
-          logger.info('s3_key_updated', { documentId: document.id, s3_key: newS3Key });
+          logger.info('document_uploaded_to_s3', { documentId: document.id, s3_key: s3Key });
         } catch (s3Error: any) {
-          logger.error('s3_key_update_failed', { error: s3Error.message });
-          // Non-critical - document still functional
+          logger.error('s3_upload_failed', { documentId: document.id, error: s3Error.message });
+          // Non-critical - document still functional without file
         }
       }
 

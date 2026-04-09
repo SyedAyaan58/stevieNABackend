@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { getSupabaseClient } from '../config/supabase';
+import logger from '../utils/logger';
 
 // Extend Express Request type to include user information
 export interface AuthenticatedRequest extends Request {
@@ -70,7 +71,7 @@ export const validateJWT = async (
 
     next();
   } catch (error) {
-    console.error('JWT validation error:', error);
+    logger.error('jwt_validation_error', { error: (error as any)?.message, path: req.path });
     res.status(500).json({
       success: false,
       error: 'InternalServerError',
@@ -114,7 +115,7 @@ export const optionalAuth = async (
 
     next();
   } catch (error) {
-    console.error('Optional auth error:', error);
+    logger.warn('optional_auth_error', { error: (error as any)?.message, path: req.path });
     // Continue without authentication on error
     next();
   }

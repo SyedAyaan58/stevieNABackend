@@ -58,8 +58,9 @@ const transports: winston.transport[] = [
   }),
 ];
 
-// Add file transports in production
-if (process.env.NODE_ENV === 'production') {
+// File transports only for non-ephemeral environments (opt-in via LOG_TO_FILE=true)
+// On Render/Heroku/etc, the filesystem is ephemeral — use stdout JSON logging only
+if (process.env.LOG_TO_FILE === 'true') {
   transports.push(
     new winston.transports.File({
       filename: 'logs/error.log',

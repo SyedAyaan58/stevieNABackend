@@ -105,17 +105,32 @@ export class AwardSearchService {
   private async processQueue(): Promise<void> {
     if (this.processing || this.queue.length === 0) return;
     this.processing = true;
-    while (this.queue.length > 0) {
-      const request = this.queue.shift();
-      if (!request) break;
-      awardSearchQueueDepth.set(this.queue.length);
-      try {
-        const result = await this.executeSearch(request.query);
-        request.resolve(result);
-      } catch (error: any) {
-        request.reject(error);
+
+    const MAX_CONCURRENT = 3;
+    const active = new Set<Promise<void>>();
+
+    const startNext = () => {
+      while (active.size < MAX_CONCURRENT && this.queue.length > 0) {
+        const request = this.queue.shift();
+        if (!request) break;
+        awardSearchQueueDepth.set(this.queue.length);
+
+        const task: Promise<void> = this.executeSearch(request.query)
+          .then(result => request.resolve(result))
+          .catch(error => request.reject(error))
+          .finally(() => active.delete(task));
+
+        active.add(task);
       }
+    };
+
+    startNext();
+
+    while (active.size > 0) {
+      await Promise.race(active);
+      startNext();
     }
+
     this.processing = false;
   }
 
@@ -129,8 +144,8 @@ export class AwardSearchService {
       queryIntent = String(plan.intent.type);
       logger.info('award_search_plan_complete', { intent: plan.intent.type, targetUrls: plan.targetUrls.length, keywords: plan.keywords.slice(0, 5) });
       const cachedResults = await awardSearchCacheManager.getMultiple(plan.targetUrls);
-      const cachedUrls = Object.keys(cachedResults);
-      const missingUrls = plan.targetUrls.filter((url) => !cachedUrls.includes(url));
+      const cachedUrls = [...cachedResults.keys()];
+      const missingUrls = plan.targetUrls.filter((url) => !cachedResults.has(url));
       if (cachedUrls.length > 0) {
         logger.info('award_search_cache_hit', { cachedCount: cachedUrls.length, missingCount: missingUrls.length });
       }
@@ -185,7 +200,7 @@ export class AwardSearchService {
         },
       }));
       
-      const allResults = [...Object.values(cachedResults), ...crawlResults];
+      const allResults = [...cachedResults.values(), ...crawlResults] as any[];
       cacheHit = missingUrls.length === 0 && cachedUrls.length > 0;
       if (allResults.length === 0) throw new Error('No results found for query');
       

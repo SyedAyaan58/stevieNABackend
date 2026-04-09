@@ -149,24 +149,26 @@ export class CacheManager {
    * Returns: { allowed: boolean, remaining: number, resetAt: number }
    */
   async checkRateLimit(
-    ip: string, 
-    route: string, 
-    limit: number = 30
+    ip: string,
+    route: string,
+    limit: number = 30,
+    windowSec?: number
   ): Promise<{ allowed: boolean; remaining: number; resetAt: number }> {
+    const window = windowSec || this.RATE_LIMIT_WINDOW;
     if (!this.redisAvailable || !this.redis) {
       // Graceful degradation: allow request if Redis unavailable
-      return { allowed: true, remaining: limit, resetAt: Date.now() + this.RATE_LIMIT_WINDOW * 1000 };
+      return { allowed: true, remaining: limit, resetAt: Date.now() + window * 1000 };
     }
 
     const key = `rate:${ip}:${route}`;
-    
+
     try {
       // Atomic increment
       const count = await this.redis.incr(key);
-      
-      // Set TTL on first request
+
+      // Set TTL on first request — uses actual configured window
       if (count === 1) {
-        await this.redis.expire(key, this.RATE_LIMIT_WINDOW);
+        await this.redis.expire(key, window);
       }
       
       const ttl = await this.redis.ttl(key);

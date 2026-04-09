@@ -214,7 +214,7 @@ export class SessionManager {
       .update({
         session_data: sessionData,
         conversation_state: conversationState,
-        // updated_at is automatically set by trigger
+        expires_at: new Date(Date.now() + this.SESSION_TTL_MS).toISOString(),
       })
       .eq('id', sessionId)
       .select()
